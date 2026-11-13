@@ -271,6 +271,23 @@ impl ComAmazonawsEc2Amazonec2State {
                 publish(leaf, (*value).to_string());
             }
         }
+        // theo: the `release_version` leaf of each EKS optimized AMI hierarchy, published
+        // only while the image its `image_id` leaf names is visible.
+        for hierarchy in super::eks_optimized_hierarchies() {
+            let Some(image) = ids
+                .get(&hierarchy.image_id_parameter())
+                .and_then(|image_id| self.images.get(image_id))
+            else {
+                continue;
+            };
+            published.insert(
+                format!("{}/{}", hierarchy.path, super::RELEASE_VERSION_LEAF),
+                PublicSsmParameterValue {
+                    value: hierarchy.release_version.to_string(),
+                    published_at: image.creation_date.clone(),
+                },
+            );
+        }
         published
     }
 }

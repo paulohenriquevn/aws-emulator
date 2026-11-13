@@ -2459,6 +2459,9 @@ pub use published_amazon_linux::*;
 /// below.
 mod published_image_metadata;
 pub use published_image_metadata::*;
+// theo: the EKS optimized AMI hierarchies.
+mod published_eks_optimized;
+pub use published_eks_optimized::*;
 mod import_image_tasks_and_verified_access;
 /// The export-image-task store: the status catalog `ExportImageTask$Status` publishes, the
 /// record `ExportImage` writes and `DescribeExportImageTasks` reports, and the ceilings that
