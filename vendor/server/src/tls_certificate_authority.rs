@@ -44,7 +44,12 @@ impl TlsCertificateAuthority {
         if let Some(made) = PROCESS.get() {
             return Ok(made);
         }
-        let mut names: Vec<String> = ["localhost", "127.0.0.1", "::1"].map(String::from).into();
+        // theo: `*.localhost` too, so a client that injects a host prefix (S3 Control's
+        // `<account-id>.` prefix, aws/aws-emulator#56) still verifies the certificate when it
+        // dials `https://localhost:<port>`; every name under `localhost` is loopback
+        // (RFC 6761 §6.3).
+        let mut names: Vec<String> =
+            ["localhost", "*.localhost", "127.0.0.1", "::1"].map(String::from).into();
         let bound = crate::bind_address_from_env().ok();
         for ip in [bound, client_host].into_iter().flatten() {
             let name = ip.to_string();
