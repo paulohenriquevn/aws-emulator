@@ -44,5 +44,8 @@ service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
 service-com-amazonaws-autoscaling-autoscaling-2011-01-01 = { workspace = true }
 
+[dev-dependencies]
+rustls = { workspace = true }
+
 [lints]
 workspace = true

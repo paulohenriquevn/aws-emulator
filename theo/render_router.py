@@ -76,6 +76,9 @@ tracing = {{ workspace = true }}
 tracing-subscriber = {{ workspace = true }}
 {deps}
 
+[dev-dependencies]
+rustls = {{ workspace = true }}
+
 [lints]
 workspace = true
 """

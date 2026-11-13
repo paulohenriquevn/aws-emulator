@@ -2203,25 +2203,6 @@ mod tests {
         }
     }
 
-    // theo: S3 Control prefixes the endpoint host with the account id (aws/aws-emulator#56).
-    #[test]
-    fn rustls_verifies_an_account_prefixed_localhost_host() {
-        use rustls::client::danger::ServerCertVerifier;
-        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let der = CertificateDer::from(TlsCertificateAuthority::for_this_process().der().to_vec());
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(der.clone()).unwrap();
-        let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
-            .build()
-            .unwrap();
-        for name in ["localhost", "000000000000.localhost"] {
-            let host = ServerName::try_from(name).unwrap();
-            let verified = verifier.verify_server_cert(&der, &[], &host, &[], UnixTime::now());
-            check!(verified.is_ok());
-        }
-    }
-
     #[test]
     fn a_wildcard_bind_is_dialed_on_loopback_and_an_address_as_itself() {
         let dial = |bind: &str| dialable_host(bind.parse().unwrap()).to_string();
