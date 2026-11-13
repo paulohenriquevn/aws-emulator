@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "theo/router",
     "services/service-com-amazonaws-accessanalyzer-accessanalyzer",
     "services/service-com-amazonaws-account-account",
     "services/service-com-amazonaws-accountaccess-awsaccountaccess",
