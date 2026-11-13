@@ -93,6 +93,9 @@ mod patch_baseline_approval_coverage;
 mod patch_baseline_details;
 #[path = "all/public_amazon_linux_alias_namespace.rs"]
 mod public_amazon_linux_alias_namespace;
+// theo: the EKS optimized AMI hierarchies terraform-aws-modules/eks reads.
+#[path = "all/public_eks_optimized_ami_hierarchies.rs"]
+mod public_eks_optimized_ami_hierarchies;
 #[path = "all/public_image_metadata_hierarchies.rs"]
 mod public_image_metadata_hierarchies;
 #[path = "all/public_parameter_catalog.rs"]

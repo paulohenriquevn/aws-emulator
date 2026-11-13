@@ -149,3 +149,6 @@ mod validation_domain_superdomain;
 mod validation_mail_dispatch_span;
 #[path = "all/validation_message_rendering.rs"]
 mod validation_message_rendering;
+// theo: a wildcard shares its apex's DNS validation CNAME.
+#[path = "all/wildcard_dns_validation_record.rs"]
+mod wildcard_dns_validation_record;
