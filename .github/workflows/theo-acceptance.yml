@@ -1,0 +1,100 @@
+# theo: proves the gaps theo's Terraform modules hit stay fixed.
+#
+# One job, so every step reuses the same target directory: the EC2 crate alone needs
+# several GB of memory to compile, and building it twice would double the bill.
+name: theo acceptance
+
+on:
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: theo-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # No debug info: it is most of rustc's peak memory on the EC2 crate.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # A red run still keeps the compiled EC2 crate for the next one.
+          cache-on-failure: true
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+
+      - name: The slim router matches theo/services.txt
+        run: python3 theo/render_router.py --check
+
+      - name: Regression tests for the fixed gaps
+        run: >-
+          cargo test
+          -p service-com-amazonaws-ec2-amazonec2
+          -p service-com-amazonaws-acm-certificatemanager
+          -p service-com-amazonaws-ssm-amazonssm
+          --test all --
+          network_acl_tags
+          security_group_all_protocols_revoke
+          wildcard_dns_validation_record
+          public_eks_optimized_ami_hierarchies
+
+      - name: The TLS test fails without the *.localhost name
+        run: |
+          sed -i 's/"\*\.localhost", //' vendor/server/src/tls_certificate_authority.rs
+          if grep -q '"\*\.localhost"' vendor/server/src/tls_certificate_authority.rs; then
+            echo "the mutation did not apply" >&2; exit 1
+          fi
+          if cargo test -p theo-aws-emulator-router --test tls_certificate; then
+            echo "the TLS test passed without *.localhost, so it does not guard the fix" >&2
+            exit 1
+          fi
+          git restore vendor/server/src/tls_certificate_authority.rs
+
+      - name: The TLS test passes with the fix
+        run: cargo test -p theo-aws-emulator-router --test tls_certificate
+
+      - name: Build the emulator
+        run: cargo build -p theo-aws-emulator-router
+
+      - name: Terraform acceptance fixtures
+        env:
+          THEO_ACCEPTANCE_WORK: ${{ runner.temp }}/acceptance
+        run: theo/acceptance/run.sh target/debug/theo-aws-emulator
+
+      - name: Full test suites of the patched services
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo test --no-fail-fast
+          -p service-com-amazonaws-ec2-amazonec2
+          -p service-com-amazonaws-acm-certificatemanager
+          -p service-com-amazonaws-ssm-amazonssm
+
+      - name: Keep the acceptance logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: acceptance-logs
+          path: |
+            ${{ runner.temp }}/acceptance/*/terraform.log
+            ${{ runner.temp }}/acceptance/*/home/emulator.log
+          if-no-files-found: ignore
