@@ -52,6 +52,11 @@ impl TlsCertificateAuthority {
         let mut names: Vec<String> =
             ["localhost", "127.0.0.1", "::1"].map(String::from).into();
         names.insert(1, format!("{}.localhost", crate::EMULATOR_ACCOUNT_ID));
+        // theo: the extra loopback addresses a resource may listen on when its configured
+        // port is taken on 127.0.0.1 (`listeners::EXTRA_LOOPBACK_ADDRESSES`).
+        names.extend(
+            crate::listeners::EXTRA_LOOPBACK_ADDRESSES.map(|last| format!("127.0.0.{last}")),
+        );
         let bound = crate::bind_address_from_env().ok();
         for ip in [bound, client_host].into_iter().flatten() {
             let name = ip.to_string();

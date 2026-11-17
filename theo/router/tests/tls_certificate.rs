@@ -40,3 +40,13 @@ fn the_certificate_verifies_an_account_prefixed_localhost_host() {
 fn the_certificate_still_refuses_a_host_it_does_not_name() {
     assert!(!verifies("emulator.example.org"));
 }
+
+/// A resource whose configured port is taken on 127.0.0.1 listens on an extra loopback
+/// address (`127.0.0.2` to `127.0.0.16`), and a client verifying TLS there must succeed.
+#[test]
+fn the_certificate_verifies_the_extra_loopback_addresses() {
+    for host in ["127.0.0.2", "127.0.0.16"] {
+        assert!(verifies(host), "{host}");
+    }
+    assert!(!verifies("127.0.0.17"), "127.0.0.17 is not one of them");
+}

@@ -19,5 +19,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - EC2 revokes an all-protocols security group rule whatever port range the request names (#1)
 - ACM reports the same DNS validation record for a wildcard name as for its apex (#1)
 - Elastic Load Balancing v2 calls reach the ELBv2 model; the router lacked the Classic front door that serves the shared `elasticloadbalancing` signing name (#1)
-- An RDS instance or cluster listens on the `Port` it was created with when that port is free, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
+- An RDS instance or cluster listens on the `Port` it was created with, on another loopback address when 127.0.0.1 already serves that port, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
 - The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)

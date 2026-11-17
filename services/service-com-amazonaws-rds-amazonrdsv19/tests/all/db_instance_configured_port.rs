@@ -7,8 +7,9 @@
 //! `CreateDBInstance`). The Terraform AWS provider reads its `port` attribute from
 //! `Endpoint.Port`, so an instance that publishes an OS-assigned port instead shows a
 //! change on every plan after the first apply. The listener now takes the configured port
-//! when it is free and falls back to the configured listener range when another process
-//! holds it, so the instance stays reachable either way.
+//! on 127.0.0.1, or on another loopback address when that one is taken (so two instances
+//! can both serve 5432), and falls back to the listener range only where no extra
+//! loopback address routes.
 
 use std::net::TcpListener;
 
@@ -50,8 +51,14 @@ async fn a_served_instance_listens_on_the_port_it_was_created_with() {
     }
 }
 
+/// Whether this host routes `127.0.0.2` to the loopback interface (Linux does; macOS
+/// needs an alias). Where it does not, a taken port falls back to the listener range.
+fn extra_loopback_available() -> bool {
+    TcpListener::bind(("127.0.0.2", 0)).is_ok()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_port_another_process_holds_falls_back_to_a_reachable_one() {
+async fn a_port_another_process_holds_still_leaves_the_instance_reachable() {
     let router = emulator();
     let held = TcpListener::bind(("127.0.0.1", 0)).expect("a free loopback port");
     let held_port = held.local_addr().expect("a bound address").port();
@@ -62,14 +69,53 @@ async fn a_port_another_process_holds_falls_back_to_a_reachable_one() {
         &[("Port", held_port.to_string())],
     )
     .await;
-    assert_ne!(
-        published, held_port,
-        "case a held port: the instance cannot listen where another process already does"
-    );
+    if extra_loopback_available() {
+        assert_eq!(
+            (published, address != "127.0.0.1"),
+            (held_port, true),
+            "case a held port: the instance keeps its Port on another loopback address, \
+             got {address}:{published}"
+        );
+    } else {
+        assert_ne!(
+            published, held_port,
+            "case a held port without extra loopback addresses: the instance falls back"
+        );
+    }
     TcpStream::connect((address.as_str(), published))
         .await
         .unwrap_or_else(|error| {
-            panic!("case a held port: the fallback port must accept a connection: {error}")
+            panic!("case a held port: the published endpoint must accept a connection: {error}")
         });
     drop(held);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_instances_created_with_one_port_both_publish_it() {
+    if !extra_loopback_available() {
+        eprintln!("skipped: this host routes no extra loopback address");
+        return;
+    }
+    let router = emulator();
+    let port = free_port();
+    let mut endpoints = Vec::new();
+    for identifier in ["emu-shared-port-a", "emu-shared-port-b"] {
+        let endpoint =
+            available_instance(&router, identifier, "postgres", &[("Port", port.to_string())])
+                .await;
+        assert_eq!(
+            endpoint.1, port,
+            "case {identifier}: Endpoint.Port must be the Port it was created with"
+        );
+        TcpStream::connect((endpoint.0.as_str(), endpoint.1))
+            .await
+            .unwrap_or_else(|error| {
+                panic!("case {identifier}: its endpoint must accept a connection: {error}")
+            });
+        endpoints.push(endpoint);
+    }
+    assert_ne!(
+        endpoints[0].0, endpoints[1].0,
+        "case two instances on one port: each needs its own address, got {endpoints:?}"
+    );
 }

@@ -84,6 +84,32 @@ fn bind_std(bind_ip: IpAddr, range: PortRange) -> Result<std::net::TcpListener, 
     }
 }
 
+/// theo: the extra loopback addresses a preferred port may land on when another
+/// listener holds it on `127.0.0.1`, so two resources configured with the same port
+/// (two RDS instances on 5432) both serve it. Linux routes all of `127.0.0.0/8` to the
+/// loopback interface; where only `127.0.0.1` is configured (macOS by default) these
+/// binds fail and the caller falls back to the listener range. The process certificate
+/// names each of them ([`crate::TlsCertificateAuthority`]).
+pub const EXTRA_LOOPBACK_ADDRESSES: std::ops::RangeInclusive<u8> = 2..=16;
+
+/// theo: bind `port` on `bind_ip`, or, on the default `127.0.0.1` bind, on the first
+/// [`EXTRA_LOOPBACK_ADDRESSES`] address where it is free. `None` when none is.
+async fn bind_preferred(bind_ip: IpAddr, port: u16) -> Option<tokio::net::TcpListener> {
+    if let Ok(listener) = tokio::net::TcpListener::bind((bind_ip, port)).await {
+        return Some(listener);
+    }
+    if bind_ip != IpAddr::from([127, 0, 0, 1]) {
+        return None;
+    }
+    for last in EXTRA_LOOPBACK_ADDRESSES {
+        let ip = IpAddr::from([127, 0, 0, last]);
+        if let Ok(listener) = tokio::net::TcpListener::bind((ip, port)).await {
+            return Some(listener);
+        }
+    }
+    None
+}
+
 /// Async sibling of [`bind_std`] for the native (`tcp`) path.
 async fn bind_tokio(bind_ip: IpAddr, range: PortRange) -> Result<tokio::net::TcpListener, SurfaceError> {
     match range {
@@ -312,7 +338,7 @@ async fn serve_native<H: NativeHandler>(
         let acceptor = tls;
         let bind_ip = bind_ip_from_env()?;
         let preferred = match preferred_port.filter(|port| *port != 0) {
-            Some(port) => tokio::net::TcpListener::bind((bind_ip, port)).await.ok(),
+            Some(port) => bind_preferred(bind_ip, port).await,
             None => None,
         };
         let listener = match preferred {
