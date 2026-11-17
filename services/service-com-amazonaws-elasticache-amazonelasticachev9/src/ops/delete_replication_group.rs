@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteReplicationGroup
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteReplicationGroup`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteReplicationGroup::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! theo: implemented in the theo fork. The Terraform AWS provider destroys an
+//! `aws_elasticache_replication_group` with this operation, so the scaffolded 501 left
+//! every stack holding one undestroyable.
 //!
 //! ## Shape of an operation
 //!
@@ -170,18 +164,126 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteReplicationGroup` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteReplicationGroupErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteReplicationGroup"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::STORE_UNAVAILABLE,
+            ));
+        };
+
+        // Same identity rule as `CreateReplicationGroup`: the id "is not case sensitive"
+        // and is stored lowercased.
+        let key = input.replication_group_id.to_ascii_lowercase();
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        let Some(group) = store.settled_replication_group_mut(&key, now) else {
+            return Err(DeleteReplicationGroupErrorModeled::ReplicationGroupNotFoundFault(
+                ReplicationGroupNotFoundFault {
+                    message: Some(crate::state::replication_group_not_found_message(
+                        &input.replication_group_id,
+                    )),
+                },
+            )
+            .into());
+        };
+
+        // "The requested replication group is not in the available state."
+        if group.status != crate::state::STATUS_AVAILABLE {
+            return Err(DeleteReplicationGroupErrorModeled::InvalidReplicationGroupStateFault(
+                InvalidReplicationGroupStateFault {
+                    message: Some(format!(
+                        "Replication group {key} is in {} state, not available.",
+                        group.status
+                    )),
+                },
+            )
+            .into());
+        }
+
+        // A member of a Global datastore leaves it through the Global datastore
+        // operations first; deleting it here would leave the datastore naming a group
+        // that no longer exists.
+        if let Some(global) = group.global_replication_group_id.as_deref() {
+            return Err(DeleteReplicationGroupErrorModeled::InvalidReplicationGroupStateFault(
+                InvalidReplicationGroupStateFault {
+                    message: Some(format!(
+                        "Replication group {key} is a member of Global datastore {global}; \
+                         disassociate it first."
+                    )),
+                },
+            )
+            .into());
+        }
+
+        // A final snapshot cannot be taken here, the same way `DeleteCacheCluster`
+        // refuses one: accepting the member would claim a snapshot never taken.
+        if let Some(name) = input.final_snapshot_identifier.as_deref() {
+            return Err(
+                DeleteReplicationGroupErrorModeled::SnapshotFeatureNotSupportedFault(
+                    SnapshotFeatureNotSupportedFault {
+                        message: Some(format!(
+                            "FinalSnapshotIdentifier {name} cannot be honoured: this emulator \
+                             takes no final snapshot of a replication group."
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // Keeping the primary turns it into a standalone cluster, which this emulator
+        // does not model; refusing is the honest answer.
+        if input.retain_primary_cluster == Some(true) {
+            return Err(
+                DeleteReplicationGroupErrorModeled::InvalidParameterValueException(
+                    InvalidParameterValueException {
+                        message: Some(
+                            "RetainPrimaryCluster=true is not supported by this emulator."
+                                .to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The group and every member cluster are leaving: the snapshot handed back
+        // reports them `deleting`, and the records are removed so a following describe
+        // answers `ReplicationGroupNotFoundFault`, which is what a deletion waiter polls for.
+        group.status = crate::state::STATUS_DELETING.to_string();
+        group.pending_status = None;
+        for shard in &mut group.node_groups {
+            shard.status = crate::state::STATUS_DELETING.to_string();
+        }
+        let members = group.member_clusters();
+        for member in &members {
+            if let Some(cluster) = store.cache_clusters.get_mut(member) {
+                cluster.status = crate::state::STATUS_DELETING.to_string();
+                cluster.pending_status = None;
+                cluster.pending_event = None;
+                cluster.set_node_status(crate::state::STATUS_DELETING);
+            }
+        }
+        let deleted = store.modeled_replication_group(&key);
+        store.record_event(
+            crate::state::SOURCE_TYPE_REPLICATION_GROUP,
+            &key,
+            "Replication group deleted",
+            now,
+        );
+        for member in &members {
+            store.cache_clusters.remove(member);
+        }
+        store.replication_groups.remove(&key);
+        // A user group reports the replication groups it is associated to; a deleted
+        // group is associated to nothing.
+        for user_group in store.user_groups.values_mut() {
+            user_group.replication_group_ids.retain(|group_id| group_id != &key);
+        }
+
+        Ok(DeleteReplicationGroupOutput {
+            replication_group: deleted,
+        })
     }
 }
