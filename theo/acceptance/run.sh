@@ -9,15 +9,25 @@
 #   4. empty      nothing the fixture created is left behind (checked by the destroy
 #                 plan's own state, which must be empty)
 #
-# Usage: theo/acceptance/run.sh <emulator-binary> [fixture ...]
+# Usage: theo/acceptance/run.sh <emulator-binary | docker:IMAGE> [fixture ...]
+#   <emulator-binary>  this fork's theo-aws-emulator, over HTTPS with its own CA
+#   docker:IMAGE       an emulator image that serves plain HTTP on container port 4566
+#                      (Floci, LocalStack), started fresh for every fixture
 # Exit status: 0 when every selected fixture passes, 1 otherwise.
 set -euo pipefail
 
-if [[ $# -lt 1 || ! -x $1 ]]; then
-  echo "usage: $0 <emulator-binary> [fixture ...]  (binary not found or not executable: ${1:-<none>})" >&2
+TARGET=${1:-}
+if [[ $TARGET == docker:?* ]]; then
+  IMAGE=${TARGET#docker:}
+  BIN=
+elif [[ -n $TARGET && -x $TARGET ]]; then
+  IMAGE=
+  BIN=$(realpath "$TARGET")
+else
+  echo "usage: $0 <emulator-binary | docker:IMAGE> [fixture ...]  (not an executable or docker:IMAGE: ${TARGET:-<none>})" >&2
   exit 2
 fi
-BIN=$(realpath "$1"); shift
+shift
 HERE=$(cd "$(dirname "$0")" && pwd)
 mapfile -t FIXTURES < <(if [[ $# -gt 0 ]]; then printf '%s\n' "$@"; else
   find "$HERE" -mindepth 1 -maxdepth 1 -type d ! -name '_*' -printf '%f\n' | sort; fi)
@@ -30,7 +40,32 @@ PORT=${THEO_ACCEPTANCE_PORT:-9397}
 # Never let a fixture find real credentials: everything AWS comes from the emulator.
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE
 
+start_container() {
+  local home=$1
+  mkdir -p "$home"
+  EMU_CONTAINER=theo-acceptance-$(basename "$(dirname "$home")")
+  docker rm -f "$EMU_CONTAINER" >/dev/null 2>&1 || true
+  # The Docker socket lets the image start the real engines it backs RDS, ElastiCache
+  # and EKS with.
+  docker run -d --name "$EMU_CONTAINER" -p "$PORT:4566" \
+    -v /var/run/docker.sock:/var/run/docker.sock "$IMAGE" >"$home/container.id"
+  for _ in $(seq 120); do
+    if [[ $(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/") != 000 ]]; then
+      export AWS_ENDPOINT_URL=http://localhost:$PORT
+      export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
+      export AWS_EC2_METADATA_DISABLED=true AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
+      unset AWS_CA_BUNDLE AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE
+      return 0
+    fi
+    sleep 1
+  done
+  docker logs "$EMU_CONTAINER" >"$home/emulator.log" 2>&1 || true
+  echo "container $EMU_CONTAINER did not answer on port $PORT; log: $home/emulator.log" >&2
+  return 1
+}
+
 start_emulator() {
+  if [[ -n $IMAGE ]]; then start_container "$@"; return; fi
   local home=$1
   mkdir -p "$home"
   HOME=$home "$BIN" -p "$PORT" --telemetry off >"$home/emulator.log" 2>&1 &
@@ -57,6 +92,11 @@ start_emulator() {
 stop_emulator() {
   if [[ -n ${EMU_PID:-} ]]; then kill "$EMU_PID" 2>/dev/null || true; wait "$EMU_PID" 2>/dev/null || true; fi
   EMU_PID=
+  if [[ -n ${EMU_CONTAINER:-} ]]; then
+    docker logs "$EMU_CONTAINER" >"$WORK/${EMU_CONTAINER#theo-acceptance-}/home/emulator.log" 2>&1 || true
+    docker rm -f "$EMU_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  EMU_CONTAINER=
 }
 trap stop_emulator EXIT
 
@@ -68,7 +108,11 @@ for fx in "${FIXTURES[@]}"; do
   cp -rL "$HERE/$fx/." "$dir/src"
   log=$dir/terraform.log
   apply=- replan=- destroy=-
-  start_emulator "$dir/home"
+  if ! start_emulator "$dir/home"; then
+    failed=1
+    printf '%-10s %-8s %-8s %-8s %s\n' "$fx" START-FAIL - - "$dir/home/emulator.log"
+    continue
+  fi
   (
     cd "$dir/src"
     terraform init -input=false -no-color >>"$log" 2>&1
