@@ -217,7 +217,7 @@ impl Listeners {
     ) -> Result<ResourceListener, SurfaceError> {
         let server_config = Arc::new(self.rustls_server_config()?);
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-        serve_native(handler, idle, Some(acceptor)).await
+        serve_native(handler, idle, Some(acceptor), None).await
     }
 
     /// Open a native-protocol (TCP) listener that hands the RAW, unencrypted
@@ -231,7 +231,28 @@ impl Listeners {
         &self,
         handler: H,
     ) -> Result<ResourceListener, SurfaceError> {
-        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None).await
+        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None, None).await
+    }
+
+    /// theo: [`Self::tcp_plaintext`] on `preferred_port` when it is free on the bind
+    /// interface, else on a port from the configured range as `tcp_plaintext` picks one.
+    ///
+    /// For a resource whose API publishes the port it was configured with (an RDS
+    /// instance's `Endpoint.Port` is the `Port` it was created with): a client that reads
+    /// the port back, such as the Terraform AWS provider, sees the value it set, and a port
+    /// another process holds still leaves the resource reachable.
+    pub async fn tcp_plaintext_preferring<H: NativeHandler>(
+        &self,
+        handler: H,
+        preferred_port: u16,
+    ) -> Result<ResourceListener, SurfaceError> {
+        serve_native(
+            handler,
+            Duration::from_secs(caps::IDLE_TIMEOUT_SECS),
+            None,
+            Some(preferred_port),
+        )
+        .await
     }
 }
 
@@ -285,10 +306,19 @@ async fn serve_native<H: NativeHandler>(
     handler: H,
     idle: Duration,
     tls: Option<tokio_rustls::TlsAcceptor>,
+    preferred_port: Option<u16>,
 ) -> Result<ResourceListener, SurfaceError> {
     {
         let acceptor = tls;
-        let listener = bind_tokio(bind_ip_from_env()?, listener_port_range_from_env()?).await?;
+        let bind_ip = bind_ip_from_env()?;
+        let preferred = match preferred_port.filter(|port| *port != 0) {
+            Some(port) => tokio::net::TcpListener::bind((bind_ip, port)).await.ok(),
+            None => None,
+        };
+        let listener = match preferred {
+            Some(listener) => listener,
+            None => bind_tokio(bind_ip, listener_port_range_from_env()?).await?,
+        };
         let addr = listener.local_addr().map_err(|e| SurfaceError::Bind(e.to_string()))?;
 
         let handler = Arc::new(handler);

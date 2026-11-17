@@ -927,6 +927,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 role: crate::state::EndpointRole::ClusterMember(record.identifier.clone()),
                 reader: false,
                 storage: Some(storage),
+                // theo: a cluster member is reached on the cluster's port, which the
+                // cluster's own listener took.
+                preferred_port: None,
             }),
             // An instance that runs its own engine, for the engines whose wire this emulator
             // speaks.
@@ -942,6 +945,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // endpoint is opened for it.
                     reader: false,
                     storage: None,
+                    // theo: listen on the configured `Port`, which `Endpoint.Port` publishes.
+                    preferred_port: u16::try_from(record.endpoint_port).ok(),
                 }
             }),
         };

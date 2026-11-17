@@ -848,6 +848,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         role: crate::state::EndpointRole::Writer,
                         reader: false,
                         storage: None,
+                        // theo: listen on the configured `Port`, which the API publishes back.
+                        preferred_port: u16::try_from(record.endpoint_port).ok(),
                     },
                 )
                 .await

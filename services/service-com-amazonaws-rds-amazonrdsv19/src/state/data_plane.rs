@@ -480,6 +480,10 @@ pub struct EngineEndpointPlan {
     /// The storage to serve: the volume of the DB cluster an endpoint belongs to, where
     /// that storage already exists. `None` starts the resource's own engine.
     pub storage: Option<Arc<sql_engine::InstanceDatabase>>,
+    /// theo: the port the resource was configured with, which the writing listener takes
+    /// when it is free so the published `Endpoint.Port` is that port. `None` lets the core
+    /// pick one, as for an endpoint whose port the API does not publish as configured.
+    pub preferred_port: Option<u16>,
 }
 
 /// Open the engine endpoint `plan` describes, and the resource's READ-ONLY endpoint where it
@@ -512,6 +516,7 @@ pub async fn open_engine_endpoint<Eng: Send + Sync + 'static>(
         role,
         reader,
         storage,
+        preferred_port,
     } = plan;
     let listeners = shared_engine(engine)
         .ok_or_else(|| "this emulator's engine has no listener surface".to_string())?
@@ -546,14 +551,26 @@ pub async fn open_engine_endpoint<Eng: Send + Sync + 'static>(
             next_connection_id: Arc::clone(&next_connection_id),
         })
     };
-    let open = |context: wire_session::SessionContext| async {
-        match wire {
-            EngineWire::Postgres => {
+    // Borrowed, so the `async move` block below copies a reference and `open` can run twice.
+    let listeners = &listeners;
+    let open = |context: wire_session::SessionContext, port: Option<u16>| async move {
+        match (wire, port) {
+            (EngineWire::Postgres, Some(port)) => {
+                listeners
+                    .tcp_plaintext_preferring(pg_wire::PostgresWire::new(context), port)
+                    .await
+            }
+            (EngineWire::Postgres, None) => {
                 listeners
                     .tcp_plaintext(pg_wire::PostgresWire::new(context))
                     .await
             }
-            EngineWire::MySql => {
+            (EngineWire::MySql, Some(port)) => {
+                listeners
+                    .tcp_plaintext_preferring(mysql_wire::MySqlWire::new(context), port)
+                    .await
+            }
+            (EngineWire::MySql, None) => {
                 listeners
                     .tcp_plaintext(mysql_wire::MySqlWire::new(context))
                     .await
@@ -561,9 +578,9 @@ pub async fn open_engine_endpoint<Eng: Send + Sync + 'static>(
         }
         .map_err(|error| format!("the engine endpoint could not be opened: {error}"))
     };
-    let listener = open(context_for(role)?).await?;
+    let listener = open(context_for(role)?, preferred_port).await?;
     let reader_listener = match reader {
-        true => Some(open(context_for(EndpointRole::Reader)?).await?),
+        true => Some(open(context_for(EndpointRole::Reader)?, None).await?),
         false => None,
     };
     Ok(DbEngineEndpoint {
