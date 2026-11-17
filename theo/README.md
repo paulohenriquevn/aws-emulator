@@ -41,7 +41,7 @@ upstream ships the fix.
 | EC2 | Revoking an all-protocols rule that names a port range | aws/aws-emulator#46 |
 | ACM | One DNS validation CNAME for a wildcard and its apex | not filed yet |
 | SSM | EKS optimized AL2023 AMI parameters | not filed yet |
-| TLS | The certificate covers `*.localhost`, for S3 Control's account prefix | aws/aws-emulator#56 |
+| TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |
 
 To find every patch: `git grep -n 'theo:' -- services vendor core`.
 

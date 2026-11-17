@@ -72,14 +72,14 @@ jobs:
           wildcard_dns_validation_record
           public_eks_optimized_ami_hierarchies
 
-      - name: The TLS test fails without the *.localhost name
+      - name: The TLS test fails without the account-prefixed localhost name
         run: |
-          sed -i 's/"\*\.localhost", //' vendor/server/src/tls_certificate_authority.rs
-          if grep -q '"\*\.localhost"' vendor/server/src/tls_certificate_authority.rs; then
+          sed -i '/names.insert(1, format!("{}.localhost"/d' vendor/server/src/tls_certificate_authority.rs
+          if grep -q 'names.insert(1' vendor/server/src/tls_certificate_authority.rs; then
             echo "the mutation did not apply" >&2; exit 1
           fi
           if cargo test -p theo-aws-emulator-router --test tls_certificate; then
-            echo "the TLS test passed without *.localhost, so it does not guard the fix" >&2
+            echo "the TLS test passed without the account-prefixed name, so it does not guard the fix" >&2
             exit 1
           fi
           git restore vendor/server/src/tls_certificate_authority.rs

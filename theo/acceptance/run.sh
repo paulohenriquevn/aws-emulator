@@ -39,7 +39,7 @@ start_emulator() {
   for _ in $(seq 60); do
     if [[ -f $ca ]] && curl -sf --cacert "$ca" "https://127.0.0.1:$PORT/__admin/health" >/dev/null; then
       # localhost, not 127.0.0.1: S3 Control prefixes the host with the account id, and
-      # only a name under localhost (covered by the certificate's *.localhost) resolves.
+      # only a name under localhost (the certificate names 000000000000.localhost) resolves.
       export AWS_ENDPOINT_URL=https://localhost:$PORT
       export AWS_CA_BUNDLE=$ca
       export AWS_SHARED_CREDENTIALS_FILE=$home/.aws/emulator/$PORT/emulator_credentials

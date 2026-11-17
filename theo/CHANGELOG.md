@@ -17,4 +17,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - EC2 accepts `CreateTags` and `DeleteTags` on network ACLs, the default one included (#1)
 - EC2 revokes an all-protocols security group rule whatever port range the request names (#1)
 - ACM reports the same DNS validation record for a wildcard name as for its apex (#1)
-- The emulator's TLS certificate covers `*.localhost`, so clients that prefix the host with the account id still verify it (#1)
+- The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)
