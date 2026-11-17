@@ -39,11 +39,11 @@ upstream ships the fix.
 |---|---|---|
 | EC2 | Tags on network ACLs | aws/aws-emulator#76 |
 | EC2 | Revoking an all-protocols rule that names a port range | aws/aws-emulator#46 |
-| ACM | One DNS validation CNAME for a wildcard and its apex | not filed yet |
-| SSM | EKS optimized AL2023 AMI parameters | not filed yet |
+| ACM | One DNS validation CNAME for a wildcard and its apex | aws/aws-emulator#536 |
+| SSM | EKS optimized AL2023 AMI parameters | aws/aws-emulator#535 |
 | TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |
-| RDS (and core listeners) | An instance listens on its configured `Port` when free, so `Endpoint.Port` matches it | not filed yet |
-| ElastiCache | `DeleteReplicationGroup` is implemented | not filed yet |
+| RDS (and core listeners) | An instance listens on its configured `Port` when free, so `Endpoint.Port` matches it | aws/aws-emulator#537 |
+| ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 
 To find every patch: `git grep -n 'theo:' -- services vendor core`.
 
