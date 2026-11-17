@@ -66,11 +66,15 @@ jobs:
           -p service-com-amazonaws-ec2-amazonec2
           -p service-com-amazonaws-acm-certificatemanager
           -p service-com-amazonaws-ssm-amazonssm
+          -p service-com-amazonaws-rds-amazonrdsv19
+          -p service-com-amazonaws-elasticache-amazonelasticachev9
           --test all --
           network_acl_tags
           security_group_all_protocols_revoke
           wildcard_dns_validation_record
           public_eks_optimized_ami_hierarchies
+          db_instance_configured_port
+          replication_group_deletion
 
       - name: The TLS test fails without the account-prefixed localhost name
         run: |
@@ -102,6 +106,8 @@ jobs:
           -p service-com-amazonaws-ec2-amazonec2
           -p service-com-amazonaws-acm-certificatemanager
           -p service-com-amazonaws-ssm-amazonssm
+          -p service-com-amazonaws-rds-amazonrdsv19
+          -p service-com-amazonaws-elasticache-amazonelasticachev9
 
       - name: Keep the acceptance logs
         if: ${{ !cancelled() }}

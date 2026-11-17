@@ -8,7 +8,7 @@ this directory, plus a few patches inside upstream crates, each marked with a `t
 
 | Path | What |
 |---|---|
-| `services.txt` | The 21 AWS services theo uses. The upstream router builds every service and needs about 100 GB of build output; ours builds only these. |
+| `services.txt` | The 22 AWS service crates theo uses. The upstream router builds every service and needs about 100 GB of build output; ours builds only these. |
 | `render_router.py` | Generates `router/` from `services.txt`. `--check` fails when the generated files are stale. |
 | `router/` | The slim router crate. Its binary is `theo-aws-emulator`. |
 | `acceptance/` | Seven Terraform fixtures (billing, compute, data, edge, network, registry, security) and `run.sh`, which runs each one against a fresh emulator. |
@@ -42,6 +42,8 @@ upstream ships the fix.
 | ACM | One DNS validation CNAME for a wildcard and its apex | not filed yet |
 | SSM | EKS optimized AL2023 AMI parameters | not filed yet |
 | TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |
+| RDS (and core listeners) | An instance listens on its configured `Port` when free, so `Endpoint.Port` matches it | not filed yet |
+| ElastiCache | `DeleteReplicationGroup` is implemented | not filed yet |
 
 To find every patch: `git grep -n 'theo:' -- services vendor core`.
 
