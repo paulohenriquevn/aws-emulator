@@ -22,13 +22,27 @@ env:
   # No debug info: it is most of rustc's peak memory on the EC2 crate.
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
-  CARGO_BUILD_JOBS: "2"
+  # One rustc at a time: the EC2 crate alone peaks at several GB.
+  CARGO_BUILD_JOBS: "1"
 
 jobs:
   acceptance:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
+      - name: Make room for the EC2 crate
+        # The hosted runner has about 7 GB of memory; without swap, rustc on the EC2
+        # crate takes the runner down (exit 143 with no post steps).
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo swapoff -a
+          sudo fallocate -l 16G /swapfile-theo
+          sudo chmod 600 /swapfile-theo
+          sudo mkswap /swapfile-theo
+          sudo swapon /swapfile-theo
+          free -h
+          df -h /
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
