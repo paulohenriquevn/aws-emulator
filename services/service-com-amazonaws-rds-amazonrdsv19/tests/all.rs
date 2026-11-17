@@ -75,6 +75,9 @@ mod db_engine_versions;
 mod db_instance_deletion;
 #[path = "all/db_instance_engine_endpoint.rs"]
 mod db_instance_engine_endpoint;
+// theo: the published port is the configured one, so Terraform shows no drift.
+#[path = "all/db_instance_configured_port.rs"]
+mod db_instance_configured_port;
 #[path = "all/db_instance_envelope.rs"]
 mod db_instance_envelope;
 #[path = "all/db_instance_read_replicas.rs"]
