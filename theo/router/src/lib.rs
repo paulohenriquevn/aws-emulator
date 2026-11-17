@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub use engine::InMemoryEngine;
 
 /// The service crates this router mounts, in registration order.
-pub const MOUNTED_SERVICES: [&str; 21] = [
+pub const MOUNTED_SERVICES: [&str; 22] = [
     "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
     "service-com-amazonaws-iam-awsidentitymanagementv20100508",
     "service-com-amazonaws-kms-trentservice",
@@ -24,6 +24,7 @@ pub const MOUNTED_SERVICES: [&str; 21] = [
     "service-com-amazonaws-elasticache-amazonelasticachev9",
     "service-com-amazonaws-eks-awswesleyfrontend",
     "service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10",
+    "service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7",
     "service-com-amazonaws-cloudfront-cloudfront2020-05-31",
     "service-com-amazonaws-wafv2-awswaf-20190729",
     "service-com-amazonaws-acm-certificatemanager",
@@ -78,7 +79,7 @@ fn mount_chunk_02(
     router.register_service(service_com_amazonaws_elasticache_amazonelasticachev9::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_eks_awswesleyfrontend::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::EmulatedService::new(engine.clone()));
-    router.register_service(service_com_amazonaws_cloudfront_cloudfront2020_05_31::EmulatedService::new(engine.clone()));
+    router.register_service(service_com_amazonaws_elasticloadbalancing_elasticloadbalancing_v7::EmulatedService::new(engine.clone()));
     router
 }
 
@@ -87,11 +88,11 @@ fn mount_chunk_03(
     mut router: MultiServiceRouter,
     engine: &Arc<InMemoryEngine>,
 ) -> MultiServiceRouter {
+    router.register_service(service_com_amazonaws_cloudfront_cloudfront2020_05_31::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_wafv2_awswaf_20190729::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_acm_certificatemanager::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_route53_awsdnsv20130401::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_cloudwatchlogs_logs_20140328::EmulatedService::new(engine.clone()));
-    router.register_service(service_com_amazonaws_cloudwatch_graniteserviceversion20100801::EmulatedService::new(engine.clone()));
     router
 }
 
@@ -100,6 +101,7 @@ fn mount_chunk_04(
     mut router: MultiServiceRouter,
     engine: &Arc<InMemoryEngine>,
 ) -> MultiServiceRouter {
+    router.register_service(service_com_amazonaws_cloudwatch_graniteserviceversion20100801::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_autoscaling_autoscaling_2011_01_01::EmulatedService::new(engine.clone()));
     router
 }

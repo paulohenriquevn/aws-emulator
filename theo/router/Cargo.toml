@@ -36,6 +36,7 @@ service-com-amazonaws-rds-amazonrdsv19 = { workspace = true }
 service-com-amazonaws-elasticache-amazonelasticachev9 = { workspace = true }
 service-com-amazonaws-eks-awswesleyfrontend = { workspace = true }
 service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10 = { workspace = true }
+service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7 = { workspace = true }
 service-com-amazonaws-cloudfront-cloudfront2020-05-31 = { workspace = true }
 service-com-amazonaws-wafv2-awswaf-20190729 = { workspace = true }
 service-com-amazonaws-acm-certificatemanager = { workspace = true }
