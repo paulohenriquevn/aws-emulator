@@ -450,18 +450,34 @@ async fn every_dns_challenge_target_sits_under_its_own_validation_label() {
     for (case, body) in rows {
         let arn = request_certificate(&router, body).await;
         let detail = describe(&router, &arn).await;
+        // theo: a wildcard shares its apex's target ("How CNAME records for ACM work",
+        // ACM User Guide), so a target repeats only for the same proven name.
+        let mut proven_here: Vec<(String, String)> = Vec::new();
         for validation in validations(case, &detail) {
             let target = validation["ResourceRecord"]["Value"]
                 .as_str()
                 .unwrap_or_else(|| panic!("case {case}: no ResourceRecord in {validation}"))
                 .to_string();
             assert_challenge_target(case, &target);
-            // One challenge per validation: no two of them point at the same target.
-            assert!(
-                !seen.contains(&target),
-                "case {case}: expected a target of its own, got the repeated {target:?}"
-            );
-            seen.push(target.clone());
+            let proven = validation["DomainName"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_start_matches("*.")
+                .to_ascii_lowercase();
+            if let Some((_, shared)) = proven_here.iter().find(|(name, _)| *name == proven) {
+                assert_eq!(
+                    &target, shared,
+                    "case {case}: a wildcard must share the target of {proven}"
+                );
+            } else {
+                // One challenge per proven name: no two of them point at the same target.
+                assert!(
+                    !seen.contains(&target),
+                    "case {case}: expected a target of its own, got the repeated {target:?}"
+                );
+                seen.push(target.clone());
+                proven_here.push((proven, target.clone()));
+            }
             // Reading again reports what was stored rather than minting a new one.
             let again = describe(&router, &arn).await;
             let repeated: Vec<String> = validations(case, &again)
