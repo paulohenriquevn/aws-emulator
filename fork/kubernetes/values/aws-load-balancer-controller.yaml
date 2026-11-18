@@ -4,8 +4,12 @@ replicaCount: 1
 enableShield: false
 enableWaf: false
 enableWafv2: false
+logLevel: debug
+# AWS_CA_BUNDLE reaches only the SDK's default HTTP client; SSL_CERT_FILE is what Go's
+# own TLS stack trusts, whatever client a component builds.
 env:
   AWS_CA_BUNDLE: /etc/emulator/ca.pem
+  SSL_CERT_FILE: /etc/emulator/ca.pem
 extraVolumes:
 - name: emulator-ca
   configMap:

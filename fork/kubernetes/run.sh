@@ -214,7 +214,7 @@ kind load docker-image eks-pod-identity-agent:fork --name "$KIND_CLUSTER" >>"$LO
 helm upgrade --install eks-pod-identity-agent "$WORK/eks-pod-identity-agent/charts/eks-pod-identity-agent" -n kube-system \
   --set clusterName="$CLUSTER" --set image.override=eks-pod-identity-agent:fork --set image.pullPolicy=Never \
   --set env.AWS_REGION="$REGION" --set env.AWS_ACCESS_KEY_ID="$KEY_ID" --set env.AWS_SECRET_ACCESS_KEY="$SECRET_KEY" \
-  --set env.AWS_CA_BUNDLE=/etc/emulator/ca.pem \
+  --set env.AWS_CA_BUNDLE=/etc/emulator/ca.pem --set env.SSL_CERT_FILE=/etc/emulator/ca.pem \
   --set-string "agent.additionalArgs.--endpoint=$AWS_ENDPOINT_URL" \
   -f "$HERE/values/eks-pod-identity-agent.yaml" --wait --timeout 180s >>"$LOG" 2>&1 || fail "the EKS Pod Identity Agent did not start; see $LOG"
 say "webhook and EKS Pod Identity Agent running"
