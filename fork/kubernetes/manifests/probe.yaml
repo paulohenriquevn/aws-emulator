@@ -1,0 +1,29 @@
+# One AWS CLI call made as service account @NAME@, with whatever identity the webhook
+# injected for it. Only the endpoint and the CA are set here.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: @NAME@
+  namespace: probes
+spec:
+  serviceAccountName: @NAME@
+  restartPolicy: Never
+  containers:
+  - name: aws
+    image: @IMAGE@
+    args: [@ARGS@]
+    env:
+    - name: AWS_ENDPOINT_URL
+      value: @ENDPOINT@
+    - name: AWS_CA_BUNDLE
+      value: /etc/emulator/ca.pem
+    - name: AWS_REGION
+      value: @REGION@
+    volumeMounts:
+    - name: emulator-ca
+      mountPath: /etc/emulator
+      readOnly: true
+  volumes:
+  - name: emulator-ca
+    configMap:
+      name: emulator-ca

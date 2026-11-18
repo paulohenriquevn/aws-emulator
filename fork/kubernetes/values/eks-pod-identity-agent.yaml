@@ -1,0 +1,15 @@
+# The agent calls the emulator's EKS Auth, whose certificate the emulator's own CA signs.
+daemonsets:
+  cloud:
+    volumes:
+    - name: jwk-cache
+      emptyDir: {}
+    - name: emulator-ca
+      configMap:
+        name: emulator-ca
+    volumeMounts:
+    - mountPath: /var/lib/eks-pod-identity-agent
+      name: jwk-cache
+    - mountPath: /etc/emulator
+      name: emulator-ca
+      readOnly: true

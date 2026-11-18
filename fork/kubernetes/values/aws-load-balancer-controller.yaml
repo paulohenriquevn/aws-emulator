@@ -1,0 +1,16 @@
+replicaCount: 1
+# The emulator does not serve Shield Advanced, WAF Classic or WAFv2 lookups the controller
+# makes for every Ingress when these are on.
+enableShield: false
+enableWaf: false
+enableWafv2: false
+env:
+  AWS_CA_BUNDLE: /etc/emulator/ca.pem
+extraVolumes:
+- name: emulator-ca
+  configMap:
+    name: emulator-ca
+extraVolumeMounts:
+- name: emulator-ca
+  mountPath: /etc/emulator
+  readOnly: true
