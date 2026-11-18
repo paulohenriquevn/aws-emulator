@@ -135,6 +135,19 @@ jobs:
       - name: EC2 instance state changes reach EventBridge
         run: cargo test -p aws-emulator-fork-router --test ec2_instance_state_events
 
+      - name: Workload identity for a cluster outside the emulator
+        run: >-
+          cargo test
+          -p aws-emulator-fork-router --test external_cluster_identity
+
+      - name: Unit tests of the workload identity patches
+        run: >-
+          cargo test --lib
+          -p service-common
+          -p aws-emulator-fork-service-account-issuers
+          -p service-com-amazonaws-eksauth-eksauthfrontend
+          -p service-com-amazonaws-sts-awssecuritytokenservicev20110615
+
       - name: Console end to end against the emulator
         working-directory: fork/console/web
         env:
@@ -169,4 +182,50 @@ jobs:
             ${{ runner.temp }}/acceptance/*/home/emulator.log
             fork/console/web/test-results/
             ${{ runner.temp }}/console-e2e/emulator.log
+          if-no-files-found: ignore
+
+  kubernetes:
+    # Real controllers and real workload identity in a kind cluster that signs as the
+    # emulator's EKS cluster (fork/kubernetes/run.sh), on the binary the acceptance job built.
+    needs: acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install kind
+        run: |
+          curl -sSfLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          kind version
+          kubectl version --client
+          helm version
+          aws --version
+
+      - name: Fetch the emulator binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: aws-emulator-fork-linux-x64
+          path: ${{ runner.temp }}/bin
+
+      - name: Controllers and workload identity in kind
+        env:
+          KUBERNETES_WORK: ${{ runner.temp }}/kubernetes
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/aws-emulator-fork"
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo add opencost https://opencost.github.io/opencost-helm-chart
+          helm repo update
+          fork/kubernetes/run.sh "$RUNNER_TEMP/bin/aws-emulator-fork"
+
+      - name: Keep the kind logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kubernetes-logs
+          path: |
+            ${{ runner.temp }}/kubernetes/*.log
+            ${{ runner.temp }}/kubernetes/*.json
           if-no-files-found: ignore

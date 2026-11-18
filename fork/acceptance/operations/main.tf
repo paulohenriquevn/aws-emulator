@@ -1,7 +1,7 @@
 # What the operations cluster asks of AWS besides the stacks Terraform builds:
 # Cluster API's IAM bootstrap (a CloudFormation stack, as `clusterawsadm bootstrap iam`
 # creates it), CAPA's instance-state events (EventBridge -> SQS), the Shield state the
-# AWS Load Balancer Controller reads, and the on-demand prices OpenCost reads.
+# AWS Load Balancer Controller reads, and the on-demand prices of the Price List API.
 
 locals {
   controllers_role = "acceptance-capa-controllers"

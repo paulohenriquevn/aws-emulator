@@ -11,7 +11,7 @@ use std::sync::Arc;
 pub use engine::InMemoryEngine;
 
 /// The service crates this router mounts, in registration order.
-pub const MOUNTED_SERVICES: [&str; 27] = [
+pub const MOUNTED_SERVICES: [&str; 28] = [
     "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
     "service-com-amazonaws-iam-awsidentitymanagementv20100508",
     "service-com-amazonaws-kms-trentservice",
@@ -39,16 +39,23 @@ pub const MOUNTED_SERVICES: [&str; 27] = [
     "service-com-amazonaws-eventbridge-awsevents",
     "service-com-amazonaws-shield-awsshield-20160616",
     "service-com-amazonaws-pricing-awspricelistservice",
+    "service-com-amazonaws-eksauth-eksauthfrontend",
 ];
 
-/// The mounted services behind the console route: a console request is answered
-/// before SigV4 authentication or service dispatch, and every other request falls
-/// through to the services.
+/// The mounted services behind the fork's own routes, which are answered before
+/// service dispatch: the console, and the registration of an external cluster's
+/// service account key set (which checks its own SigV4 signature). Every other
+/// request falls through to the services.
 pub fn build_router(engine: Arc<InMemoryEngine>) -> WithExtraRoutes<MultiServiceRouter> {
-    WithExtraRoutes::new(build_services(engine)).route_matching(
-        aws_emulator_fork_console::claims,
-        |request| async move { aws_emulator_fork_console::respond(&request) },
-    )
+    let issuers = Arc::clone(&engine);
+    WithExtraRoutes::new(build_services(engine))
+        .route_matching(aws_emulator_fork_console::claims, |request| async move {
+            aws_emulator_fork_console::respond(&request)
+        })
+        .route_matching(aws_emulator_fork_service_account_issuers::claims, move |request| {
+            let engine = Arc::clone(&issuers);
+            async move { aws_emulator_fork_service_account_issuers::respond(&engine, &request) }
+        })
 }
 
 /// The mounted services alone, without the console route. Tests use it to turn
@@ -136,5 +143,6 @@ fn mount_chunk_05(
 ) -> MultiServiceRouter {
     router.register_service(service_com_amazonaws_shield_awsshield_20160616::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_pricing_awspricelistservice::EmulatedService::new(engine.clone()));
+    router.register_service(service_com_amazonaws_eksauth_eksauthfrontend::EmulatedService::new(engine.clone()));
     router
 }

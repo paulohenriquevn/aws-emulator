@@ -14,9 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - S3 Control is part of the router, so the Terraform AWS provider 6.23+ can read and write S3 bucket tags (#1)
 - ElastiCache implements `DeleteReplicationGroup`, so a Terraform stack holding a replication group can be destroyed (#1)
 - A read-only web console at `/_console/` that lists the resources of 23 services, with a detail page per resource (#2)
-- The router mounts CloudFormation, SQS, EventBridge, Shield and the Price List API, which Cluster API's IAM bootstrap, its instance-state events, the AWS Load Balancer Controller and OpenCost call (#2)
+- The router mounts CloudFormation, SQS, EventBridge, Shield and the Price List API, which Cluster API's IAM bootstrap, its instance-state events and the AWS Load Balancer Controller call, and which publishes the EC2 price list file OpenCost reads (#2)
 - An `operations` acceptance fixture, and `run.sh` runs a fixture's `check.sh` after `apply` (#2)
 - The `edge` fixture attaches a CloudFront response headers policy and checks an invalidation completes (#2)
+- EC2 publishes an `EC2 Instance State-change Notification` on the default EventBridge bus for every state an instance moves into, without waiting for another EC2 call (#2)
+- `PUT /_fork/eks/clusters/{name}/service-account-issuer-keys` registers a Kubernetes cluster's service account key set for an EKS cluster's OIDC issuer; STS `AssumeRoleWithWebIdentity` and EKS Auth `AssumeRoleForPodIdentity` then accept that cluster's tokens (#2)
+- The router mounts EKS Auth (#2)
+- `fork/kubernetes/run.sh` runs IRSA, EKS Pod Identity, the AWS Load Balancer Controller, External Secrets and OpenCost in a kind cluster against the emulator (#2)
 
 ### Changed
 - The fork's layer lives in `fork/`, its router crate is `aws-emulator-fork-router`, its binary is `aws-emulator-fork`, and `run.sh` reads `ACCEPTANCE_WORK` and `ACCEPTANCE_PORT`; the names no longer carry the downstream project's name (#2)

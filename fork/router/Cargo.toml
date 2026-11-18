@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 aws-emulator-fork-console = { workspace = true }
+aws-emulator-fork-service-account-issuers = { workspace = true }
 engine = { workspace = true }
 emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
@@ -50,10 +51,12 @@ service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 service-com-amazonaws-eventbridge-awsevents = { workspace = true }
 service-com-amazonaws-shield-awsshield-20160616 = { workspace = true }
 service-com-amazonaws-pricing-awspricelistservice = { workspace = true }
+service-com-amazonaws-eksauth-eksauthfrontend = { workspace = true }
 
 [dev-dependencies]
 rustls = { workspace = true }
 serde_json = { workspace = true }
+ring = "0.17"
 
 [lints]
 workspace = true

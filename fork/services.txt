@@ -29,9 +29,14 @@ service-com-amazonaws-autoscaling-autoscaling-2011-01-01
 # `clusterawsadm bootstrap iam` creates the CAPA roles through a CloudFormation stack;
 # CAPA's optional instance-state events go EventBridge -> SQS;
 # the AWS Load Balancer Controller asks Shield for the subscription state;
-# OpenCost reads on-demand prices from the Price List API.
+# OpenCost reads the EC2 price list file the Price List API publishes (GetPriceListFileUrl).
 service-com-amazonaws-cloudformation-cloudformation
 service-com-amazonaws-sqs-amazonsqs
 service-com-amazonaws-eventbridge-awsevents
 service-com-amazonaws-shield-awsshield-20160616
 service-com-amazonaws-pricing-awspricelistservice
+# EKS Pod Identity: the EKS Pod Identity Agent exchanges a pod's service account token for
+# credentials. With a local Kubernetes cluster standing in for an EKS cluster's control
+# plane, the token is verified against the key set registered for the cluster's issuer
+# (fork/service-account-issuers).
+service-com-amazonaws-eksauth-eksauthfrontend

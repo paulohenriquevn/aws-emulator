@@ -251,9 +251,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // fork: a cluster this crate's records do not hold may be an EKS cluster whose
+        // control plane runs outside the emulator, with a registered key set for its
+        // issuer (`crate::state::external_clusters`).
+        let region = ::service_com_amazonaws_eks_awswesleyfrontend::state::request_region(ctx.parts());
+        let registered_here = state.lock().cluster(&input.cluster_name).is_some();
+        let external = if registered_here {
+            None
+        } else {
+            crate::state::external_clusters::authorize(&*self.engine, &region, &input.cluster_name, &input.token, now)
+        };
+
         // The whole authorization decision reads state: the cluster, its token signing
         // key, and its associations.
-        let (association, identity) = {
+        let (association, identity) = if let Some(outcome) = external {
+            outcome.map_err(|refusal| {
+                use crate::state::external_clusters::ExternalRefusal;
+                match refusal {
+                    ExternalRefusal::Invalid => {
+                        refused(&caller_akid, &input.cluster_name, "InvalidTokenException");
+                        token_rejection(TokenRejection::Invalid)
+                    }
+                    ExternalRefusal::Expired => {
+                        refused(&caller_akid, &input.cluster_name, "ExpiredTokenException");
+                        token_rejection(TokenRejection::Expired)
+                    }
+                    ExternalRefusal::NoAssociation(identity) => {
+                        refused(&caller_akid, &input.cluster_name, "AccessDeniedException");
+                        access_denied(&input.cluster_name, &identity)
+                    }
+                }
+            })?
+        } else {
             let guard = state.lock();
             // RESOLVING THE KEY THE HEADER NAMES is the last layer of reading that
             // header: a `kid` is resolved through the OIDC provider of the cluster the

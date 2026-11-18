@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "fork/console",
+    "fork/service-account-issuers",
     "fork/router",
     "services/service-com-amazonaws-accessanalyzer-accessanalyzer",
     "services/service-com-amazonaws-account-account",
@@ -928,6 +929,7 @@ emulator-paths = { path = "vendor/emulator-paths", package = "aws-emulator-emula
 
 # The fork layer (fork/, see fork/README.md).
 aws-emulator-fork-console = { path = "fork/console" }
+aws-emulator-fork-service-account-issuers = { path = "fork/service-account-issuers" }
 
 # Public crates.io deps
 aws-smithy-schema = "0.2.1"
