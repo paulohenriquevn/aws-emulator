@@ -11,7 +11,7 @@ use std::sync::Arc;
 pub use engine::InMemoryEngine;
 
 /// The service crates this router mounts, in registration order.
-pub const MOUNTED_SERVICES: [&str; 22] = [
+pub const MOUNTED_SERVICES: [&str; 27] = [
     "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
     "service-com-amazonaws-iam-awsidentitymanagementv20100508",
     "service-com-amazonaws-kms-trentservice",
@@ -34,6 +34,11 @@ pub const MOUNTED_SERVICES: [&str; 22] = [
     "service-com-amazonaws-cloudwatchlogs-logs-20140328",
     "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
     "service-com-amazonaws-autoscaling-autoscaling-2011-01-01",
+    "service-com-amazonaws-cloudformation-cloudformation",
+    "service-com-amazonaws-sqs-amazonsqs",
+    "service-com-amazonaws-eventbridge-awsevents",
+    "service-com-amazonaws-shield-awsshield-20160616",
+    "service-com-amazonaws-pricing-awspricelistservice",
 ];
 
 /// The mounted services behind the console route: a console request is answered
@@ -53,6 +58,7 @@ fn build_services(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {
     let router = mount_chunk_02(router, &engine);
     let router = mount_chunk_03(router, &engine);
     let router = mount_chunk_04(router, &engine);
+    let router = mount_chunk_05(router, &engine);
     router
 }
 
@@ -115,5 +121,18 @@ fn mount_chunk_04(
 ) -> MultiServiceRouter {
     router.register_service(service_com_amazonaws_cloudwatch_graniteserviceversion20100801::EmulatedService::new(engine.clone()));
     router.register_service(service_com_amazonaws_autoscaling_autoscaling_2011_01_01::EmulatedService::new(engine.clone()));
+    router.register_service(service_com_amazonaws_cloudformation_cloudformation::EmulatedService::new(engine.clone()));
+    router.register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(engine.clone()));
+    router.register_service(service_com_amazonaws_eventbridge_awsevents::EmulatedService::new(engine.clone()));
+    router
+}
+
+#[inline(never)]
+fn mount_chunk_05(
+    mut router: MultiServiceRouter,
+    engine: &Arc<InMemoryEngine>,
+) -> MultiServiceRouter {
+    router.register_service(service_com_amazonaws_shield_awsshield_20160616::EmulatedService::new(engine.clone()));
+    router.register_service(service_com_amazonaws_pricing_awspricelistservice::EmulatedService::new(engine.clone()));
     router
 }

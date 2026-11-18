@@ -45,6 +45,11 @@ service-com-amazonaws-route53-awsdnsv20130401 = { workspace = true }
 service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
 service-com-amazonaws-autoscaling-autoscaling-2011-01-01 = { workspace = true }
+service-com-amazonaws-cloudformation-cloudformation = { workspace = true }
+service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+service-com-amazonaws-eventbridge-awsevents = { workspace = true }
+service-com-amazonaws-shield-awsshield-20160616 = { workspace = true }
+service-com-amazonaws-pricing-awspricelistservice = { workspace = true }
 
 [dev-dependencies]
 rustls = { workspace = true }

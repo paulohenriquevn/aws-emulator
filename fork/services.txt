@@ -25,3 +25,13 @@ service-com-amazonaws-route53-awsdnsv20130401
 service-com-amazonaws-cloudwatchlogs-logs-20140328
 service-com-amazonaws-cloudwatch-graniteserviceversion20100801
 service-com-amazonaws-autoscaling-autoscaling-2011-01-01
+# Cluster API (CAPA) and in-cluster controllers on the operations cluster:
+# `clusterawsadm bootstrap iam` creates the CAPA roles through a CloudFormation stack;
+# CAPA's optional instance-state events go EventBridge -> SQS;
+# the AWS Load Balancer Controller asks Shield for the subscription state;
+# OpenCost reads on-demand prices from the Price List API.
+service-com-amazonaws-cloudformation-cloudformation
+service-com-amazonaws-sqs-amazonsqs
+service-com-amazonaws-eventbridge-awsevents
+service-com-amazonaws-shield-awsshield-20160616
+service-com-amazonaws-pricing-awspricelistservice
