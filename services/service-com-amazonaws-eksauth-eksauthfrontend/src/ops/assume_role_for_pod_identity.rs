@@ -233,6 +233,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // dropped before the credential store is touched.
         let now = SystemTime::now();
         let expired = state.lock().expire(now);
+        // fork: STS stops reporting an expired session too.
+        let assumed_role_sessions = (&*self.engine as &dyn ::std::any::Any)
+            .downcast_ref::<::engine::InMemoryEngine>()
+            .map(|engine| engine.state::<::service_common::assumed_role_sessions::AssumedRoleSessions>());
+        if let Some(sessions) = &assumed_role_sessions {
+            let mut sessions = sessions.lock();
+            for access_key_id in &expired {
+                sessions.forget(access_key_id);
+            }
+        }
         for access_key_id in expired {
             match ctx.credential_store().delete(&access_key_id) {
                 Ok(()) => ::tracing::info!(
@@ -370,6 +380,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             instance_id: input.instance_id.clone(),
             zone: input.zone.clone(),
         };
+        // fork: record who the credentials are for STS, which reports a request signed
+        // with them as the role's session (`assumed-role/<role>/eks-...`).
+        if let Some(sessions) = &assumed_role_sessions {
+            let session_name = assume_role_id.split_once(':').map_or(assume_role_id.as_str(), |(_, name)| name);
+            match ::service_common::assumed_role_sessions::AssumedRoleSession::of_role(
+                &association.role_arn,
+                &association.role_id,
+                session_name,
+                expiration,
+            ) {
+                Some(assumed) => sessions.lock().record(&minted.id, assumed, now),
+                None => ::tracing::warn!(
+                    operation = Self::NAME,
+                    role_arn = %association.role_arn,
+                    "the associated role ARN is not a role ARN; STS will not report this session"
+                ),
+            }
+        }
         state
             .lock()
             .sessions

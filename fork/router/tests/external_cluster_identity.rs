@@ -232,6 +232,24 @@ async fn world(router: &Router, key: &ClusterKey) -> World {
     World { issuer, irsa_role, pod_role }
 }
 
+/// `sts:GetCallerIdentity` signed with `access_key_id`; answers the status and the XML body.
+async fn caller_identity(router: &Router, access_key_id: &str) -> (u16, String) {
+    let host = format!("sts.{REGION}.amazonaws.com");
+    let request = http::Request::builder()
+        .method("POST")
+        .uri(format!("https://{host}/"))
+        .header("host", &host)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "authorization",
+            format!("AWS4-HMAC-SHA256 Credential={access_key_id}/20260101/{REGION}/sts/aws4_request, SignedHeaders=host, Signature=0000"),
+        )
+        .body(Bytes::from("Action=GetCallerIdentity&Version=2011-06-15"))
+        .expect("a well-formed request");
+    let response = router.handle_request(request).await;
+    (response.status().as_u16(), String::from_utf8_lossy(response.body()).to_string())
+}
+
 async fn assume_with_web_identity(router: &Router, role_arn: &str, token: &str) -> (u16, String) {
     query(router, "sts", &format!("sts.{REGION}.amazonaws.com"), "2011-06-15", "AssumeRoleWithWebIdentity", &[("RoleArn", role_arn), ("RoleSessionName", "irsa"), ("WebIdentityToken", token)]).await
 }
@@ -284,6 +302,30 @@ fn a_pod_identity_token_the_local_cluster_signed_gets_the_associated_role() {
             assert_eq!(body["assumedRoleUser"]["arn"], json!(world.pod_role), "{body}");
             assert_eq!(body["subject"], json!({"namespace": NAMESPACE, "serviceAccount": POD_IDENTITY_ACCOUNT}), "{body}");
             assert!(body["credentials"]["accessKeyId"].as_str().is_some_and(|id| !id.is_empty()), "{body}");
+        })
+    });
+}
+
+#[test]
+fn pod_identity_credentials_are_the_associated_role_to_sts() {
+    on_router_thread(|router| {
+        Box::pin(async move {
+            let key = ClusterKey::cluster();
+            let world = world(&router, &key).await;
+            let (status, body) = assume_for_pod_identity(&router, &key.token(&world.issuer, PODS_AUDIENCE, POD_IDENTITY_ACCOUNT)).await;
+            assert_eq!(status, 200, "{body}");
+            let access_key_id = body["credentials"]["accessKeyId"].as_str().expect("an access key id").to_string();
+
+            let (status, answer) = caller_identity(&router, &access_key_id).await;
+
+            // AWS names the session eks-<cluster>-<pod>-<uuid>.
+            assert_eq!(status, 200, "{answer}");
+            let arn = element(&answer, "Arn");
+            assert!(
+                arn.starts_with(&format!("arn:aws:sts::000000000000:assumed-role/load-balancer-controller/eks-{CLUSTER}-{POD_IDENTITY_ACCOUNT}-0-")),
+                "{answer}"
+            );
+            assert_eq!(element(&answer, "UserId"), body["assumedRoleUser"]["assumeRoleId"].as_str().unwrap_or_default(), "{answer}");
         })
     });
 }
