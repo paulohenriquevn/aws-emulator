@@ -53,6 +53,7 @@ service-com-amazonaws-pricing-awspricelistservice = { workspace = true }
 
 [dev-dependencies]
 rustls = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

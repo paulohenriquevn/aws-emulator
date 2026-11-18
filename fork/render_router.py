@@ -79,6 +79,7 @@ tracing-subscriber = {{ workspace = true }}
 
 [dev-dependencies]
 rustls = {{ workspace = true }}
+serde_json = {{ workspace = true }}
 
 [lints]
 workspace = true
@@ -118,7 +119,9 @@ def render_lib(services: list[str]) -> str:
         + "        aws_emulator_fork_console::claims,\n"
         + "        |request| async move { aws_emulator_fork_console::respond(&request) },\n"
         + "    )\n}\n\n"
-        + "fn build_services(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {\n"
+        + "/// The mounted services alone, without the console route. Tests use it to turn\n"
+        + "/// request authentication off and call `dispatch` directly.\n"
+        + "pub fn build_services(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {\n"
         + "    let router = MultiServiceRouter::new();\n"
         + calls
         + "\n    router\n}\n\n"

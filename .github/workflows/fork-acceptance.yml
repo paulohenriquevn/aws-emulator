@@ -132,6 +132,9 @@ jobs:
       - name: The router answers console requests before the services
         run: cargo test -p aws-emulator-fork-router --test console_route
 
+      - name: EC2 instance state changes reach EventBridge
+        run: cargo test -p aws-emulator-fork-router --test ec2_instance_state_events
+
       - name: Console end to end against the emulator
         working-directory: fork/console/web
         env:

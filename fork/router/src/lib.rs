@@ -51,7 +51,9 @@ pub fn build_router(engine: Arc<InMemoryEngine>) -> WithExtraRoutes<MultiService
     )
 }
 
-fn build_services(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {
+/// The mounted services alone, without the console route. Tests use it to turn
+/// request authentication off and call `dispatch` directly.
+pub fn build_services(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {
     let router = MultiServiceRouter::new();
     let router = mount_chunk_00(router, &engine);
     let router = mount_chunk_01(router, &engine);
