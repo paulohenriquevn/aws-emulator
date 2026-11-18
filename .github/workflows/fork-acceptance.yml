@@ -121,6 +121,14 @@ jobs:
       - name: Build the emulator
         run: cargo build -p aws-emulator-fork-router
 
+      - name: Keep the emulator binary
+        # So the console can be tried on a machine that cannot compile the EC2 crate.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aws-emulator-fork-linux-x64
+          path: target/debug/aws-emulator-fork
+          retention-days: 7
+
       - name: The router answers console requests before the services
         run: cargo test -p aws-emulator-fork-router --test console_route
 
