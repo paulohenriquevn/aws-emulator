@@ -4,15 +4,15 @@ module "zone" {
   source  = "terraform-aws-modules/route53/aws"
   version = "6.5.1"
 
-  name = "acceptance.example.com"
+  name = "acceptance.aws-emulator.dev"
 }
 
 module "acm" {
   source  = "terraform-aws-modules/acm/aws"
   version = "6.3.1"
 
-  domain_name               = "acceptance.example.com"
-  subject_alternative_names = ["*.acceptance.example.com"]
+  domain_name               = "acceptance.aws-emulator.dev"
+  subject_alternative_names = ["*.acceptance.aws-emulator.dev"]
   zone_id                   = module.zone.id
   validation_method         = "DNS"
   wait_for_validation       = true
@@ -103,7 +103,7 @@ module "cdn" {
 
   comment             = "fork acceptance dashboard"
   default_root_object = "index.html"
-  aliases             = ["app.acceptance.example.com"]
+  aliases             = ["app.acceptance.aws-emulator.dev"]
 
   origin_access_control = {
     dashboard = {
