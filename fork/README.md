@@ -94,6 +94,14 @@ authentication on, the route takes only requests signed with the emulator's own 
 | `external-secrets` | External Secrets, on IRSA, copies a Secrets Manager secret into a Kubernetes Secret. |
 | `opencost` | OpenCost reports the node's hourly cost as the emulator's on-demand price for its instance type. |
 
+A controller built on the AWS SDK for Go v2 that gets IRSA credentials from the default credential
+chain needs `AWS_ENDPOINT_URL_STS` as well as `AWS_ENDPOINT_URL`. The SDK builds that chain's STS
+client before it reads `AWS_ENDPOINT_URL` (`aws-sdk-go-v2/config`, `resolveCredentials` runs
+before `resolveBaseEndpoint`), and the client then reads only the STS-specific variable, so
+without it the token goes to `sts.<region>.amazonaws.com`. A component that builds its own HTTP
+client also ignores `AWS_CA_BUNDLE` (the EKS Pod Identity Agent does); `SSL_CERT_FILE` pointing at
+the emulator's CA covers both cases.
+
 It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git, and network
 access for images and charts. The emulator listens on the gateway of kind's Docker network
 (`-b`), and every pod that calls it mounts its CA. The `kubernetes` job of the workflow runs it.

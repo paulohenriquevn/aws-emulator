@@ -271,7 +271,7 @@ check_load_balancer() {
   helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller --version "$LBC_CHART_VERSION" -n kube-system \
     --set clusterName="$CLUSTER" --set region="$REGION" --set vpcId="$VPC" \
     --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
-    --set "env.AWS_ENDPOINT_URL=$AWS_ENDPOINT_URL" \
+    --set "env.AWS_ENDPOINT_URL=$AWS_ENDPOINT_URL" --set "env.AWS_ENDPOINT_URL_STS=$AWS_ENDPOINT_URL" \
     -f "$HERE/values/aws-load-balancer-controller.yaml" --wait --timeout 300s >>"$LOG" 2>&1 || { say "load-balancer: the controller did not start"; diagnose load-balancer kube-system probes; return 1; }
   kubectl apply -f "$HERE/manifests/ingress-probe.yaml" >>"$LOG"
   local hostname=
