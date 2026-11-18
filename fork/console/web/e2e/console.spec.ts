@@ -40,10 +40,25 @@ function sdkConfig() {
 
 let vpcId = "";
 
+/**
+ * Create a resource the tests need, accepting one an earlier worker already created:
+ * Playwright starts a new worker, and so runs beforeAll again, after a failed test.
+ */
+async function ensure(create: () => Promise<unknown>): Promise<void> {
+  try {
+    await create();
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "";
+    if (!/AlreadyExists|AlreadyOwnedByYou|ResourceExistsException/.test(name)) {
+      throw error;
+    }
+  }
+}
+
 test.beforeAll(async () => {
   const config = sdkConfig();
   const s3 = new S3Client({ ...config, forcePathStyle: true });
-  await s3.send(new CreateBucketCommand({ Bucket: BUCKET }));
+  await ensure(() => s3.send(new CreateBucketCommand({ Bucket: BUCKET })));
   await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: OBJECT_KEY, Body: "a,b\n1,2\n" }));
 
   const ec2 = new EC2Client(config);
@@ -52,18 +67,16 @@ test.beforeAll(async () => {
   expect(vpcId, "CreateVpc returned a VPC id").not.toBe("");
   await ec2.send(new CreateTagsCommand({ Resources: [vpcId], Tags: [{ Key: "Name", Value: VPC_NAME }] }));
 
-  await new SSMClient(config).send(new PutParameterCommand({ Name: PARAMETER, Value: PARAMETER_VALUE, Type: "String" }));
-  await new SecretsManagerClient(config).send(new CreateSecretCommand({ Name: SECRET, SecretString: SECRET_VALUE }));
-  await new CloudWatchLogsClient(config).send(new CreateLogGroupCommand({ logGroupName: LOG_GROUP }));
-  await new ECRClient(config).send(new CreateRepositoryCommand({ repositoryName: REPOSITORY }));
-  await new IAMClient(config).send(
-    new CreateRoleCommand({
-      RoleName: ROLE,
-      AssumeRolePolicyDocument: JSON.stringify({
-        Version: "2012-10-17",
-        Statement: [{ Effect: "Allow", Principal: { Service: "ec2.amazonaws.com" }, Action: "sts:AssumeRole" }],
-      }),
-    }),
+  await new SSMClient(config).send(new PutParameterCommand({ Name: PARAMETER, Value: PARAMETER_VALUE, Type: "String", Overwrite: true }));
+  await ensure(() => new SecretsManagerClient(config).send(new CreateSecretCommand({ Name: SECRET, SecretString: SECRET_VALUE })));
+  await ensure(() => new CloudWatchLogsClient(config).send(new CreateLogGroupCommand({ logGroupName: LOG_GROUP })));
+  await ensure(() => new ECRClient(config).send(new CreateRepositoryCommand({ repositoryName: REPOSITORY })));
+  const trustPolicy = {
+    Version: "2012-10-17",
+    Statement: [{ Effect: "Allow", Principal: { Service: "ec2.amazonaws.com" }, Action: "sts:AssumeRole" }],
+  };
+  await ensure(() =>
+    new IAMClient(config).send(new CreateRoleCommand({ RoleName: ROLE, AssumeRolePolicyDocument: JSON.stringify(trustPolicy) })),
   );
 });
 
@@ -82,7 +95,7 @@ async function signIn(page: Page) {
 
 /** Wait until a list page's table has loaded or failed, and fail with the error it shows. */
 async function expectListLoaded(page: Page) {
-  const counter = page.locator("h1").getByText(/^\(\d+\)$/);
+  const counter = page.getByRole("heading", { level: 1, name: /\(\d+\)$/ });
   const failure = page.getByText(/failed:/);
   await expect(counter.or(failure).first()).toBeVisible();
   if ((await failure.count()) > 0) {
