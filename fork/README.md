@@ -8,11 +8,11 @@ account. Everything the fork adds lives in this directory, plus a few patches in
 
 | Path | What |
 |---|---|
-| `services.txt` | The 22 AWS service crates the router mounts. The upstream router builds every service and needs about 100 GB of build output; ours builds only these. |
+| `services.txt` | The 27 AWS service crates the router mounts. The upstream router builds every service and needs about 100 GB of build output; ours builds only these. |
 | `render_router.py` | Generates `router/` from `services.txt`. `--check` fails when the generated files are stale. |
 | `router/` | The slim router crate. Its binary is `aws-emulator-fork`. |
 | `console/` | The read-only web console the binary serves at `/_console/`: a React app in `console/web` and the crate that embeds its build. |
-| `acceptance/` | Seven Terraform fixtures (billing, compute, data, edge, network, registry, security) and `run.sh`, which runs each one against a fresh emulator. |
+| `acceptance/` | Eight Terraform fixtures (billing, compute, data, edge, network, operations, registry, security) and `run.sh`, which runs each one against a fresh emulator. |
 
 ## Usage
 
@@ -24,7 +24,9 @@ fork/acceptance/run.sh target/debug/aws-emulator-fork network   # one fixture
 ```
 
 A fixture passes when `apply` succeeds, a second `plan` shows no changes, and `destroy` leaves
-an empty state. `run.sh` needs Terraform 1.10 or later and network access to download the AWS
+an empty state. A fixture with a `check.sh` runs it after `apply`, against the same emulator, to
+exercise calls a controller makes at run time and Terraform never does (a CloudFront invalidation,
+an EventBridge event reaching its SQS target). `run.sh` needs Terraform 1.10 or later and network access to download the AWS
 provider.
 
 The EC2 crate needs several GB of memory to compile. The workflow
@@ -34,7 +36,7 @@ of the patched services on every pull request.
 ## Console
 
 The binary serves a read-only console at `https://localhost:9297/_console/`. It lists what the
-emulator holds in 20 services (EC2, VPC, S3, RDS, EKS, IAM and the rest of `services.txt` that has
+emulator holds in 23 services (EC2, VPC, S3, RDS, EKS, IAM and the rest of `services.txt` that has
 something to list), with a detail page per resource. The page calls the emulator's own AWS APIs
 from the browser with the AWS SDK for JavaScript, so it shows what any other client would read.
 
@@ -59,6 +61,17 @@ child resources, and that no page shows a secret or parameter value. A resource 
 
 `cargo build` embeds `console/web/dist` in the binary. Without it the build still succeeds and
 prints a warning; set `AWS_EMULATOR_REQUIRE_CONSOLE=1` to make that an error, as CI does.
+
+## Known limits
+
+- EKS Pod Identity is not served. Its token comes from the cluster's Kubernetes API server, which
+  the emulator does not run, so EKS Auth is not mounted. IRSA (an IAM OIDC provider and
+  `AssumeRoleWithWebIdentity`) works, and the `security` fixture covers it.
+- EC2 publishes no `EC2 Instance State-change Notification` events. A rule on that pattern can be
+  created and targeted, but only events a client sends with `PutEvents` reach it.
+- Controllers that run inside the cluster (the AWS Load Balancer Controller, External Secrets,
+  OpenCost) are not exercised here; the fixtures cover the AWS calls they make, not the
+  controllers.
 
 ## Patches to upstream crates
 

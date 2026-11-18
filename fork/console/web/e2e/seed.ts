@@ -13,6 +13,7 @@
 import { ACMClient, RequestCertificateCommand } from "@aws-sdk/client-acm";
 import { AutoScalingClient, CreateAutoScalingGroupCommand } from "@aws-sdk/client-auto-scaling";
 import { BudgetsClient, CreateBudgetCommand } from "@aws-sdk/client-budgets";
+import { CloudFormationClient, CreateStackCommand, waitUntilStackCreateComplete } from "@aws-sdk/client-cloudformation";
 import { CloudFrontClient, CreateDistributionCommand } from "@aws-sdk/client-cloudfront";
 import { CloudWatchClient, PutMetricAlarmCommand } from "@aws-sdk/client-cloudwatch";
 import { CloudWatchLogsClient, CreateLogGroupCommand, CreateLogStreamCommand } from "@aws-sdk/client-cloudwatch-logs";
@@ -40,6 +41,7 @@ import {
   UploadLayerPartCommand,
 } from "@aws-sdk/client-ecr";
 import { CreateClusterCommand, CreateNodegroupCommand, DescribeClusterCommand, EKSClient } from "@aws-sdk/client-eks";
+import { EventBridgeClient, PutRuleCommand } from "@aws-sdk/client-eventbridge";
 import { CreateCacheClusterCommand, CreateCacheSubnetGroupCommand, CreateReplicationGroupCommand, ElastiCacheClient } from "@aws-sdk/client-elasticache";
 import {
   CreateListenerCommand,
@@ -54,6 +56,7 @@ import { ChangeResourceRecordSetsCommand, CreateHostedZoneCommand, Route53Client
 import { CreateBucketCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CreateSecretCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { CreateQueueCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { CreateWebACLCommand, WAFV2Client } from "@aws-sdk/client-wafv2";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
@@ -427,6 +430,26 @@ export async function seedEverything(target: SeedTarget): Promise<SeededResource
     }),
   );
   add({ service: "cloudwatch", resource: "alarms", text: "seed-alarm" });
+
+  // CloudFormation, SQS, EventBridge
+  const cloudFormation = new CloudFormationClient(config);
+  await cloudFormation.send(
+    new CreateStackCommand({
+      StackName: "seed-stack",
+      TemplateBody: JSON.stringify({
+        AWSTemplateFormatVersion: "2010-09-09",
+        Resources: { SeedLogGroup: { Type: "AWS::Logs::LogGroup", Properties: { LogGroupName: "/seed/stack" } } },
+      }),
+    }),
+  );
+  await waitUntilStackCreateComplete({ client: cloudFormation, maxWaitTime: 60, minDelay: 1, maxDelay: 2 }, { StackName: "seed-stack" });
+  add({ service: "cloudformation", resource: "stacks", text: "seed-stack", children: { resources: "SeedLogGroup" } });
+  await new SQSClient(config).send(new CreateQueueCommand({ QueueName: "seed-queue" }));
+  add({ service: "sqs", resource: "queues", text: "seed-queue" });
+  await new EventBridgeClient(config).send(
+    new PutRuleCommand({ Name: "seed-rule", EventPattern: JSON.stringify({ source: ["seed.console"] }) }),
+  );
+  add({ service: "events", resource: "rules", text: "seed-rule" });
 
   // Budgets
   await new BudgetsClient(config).send(

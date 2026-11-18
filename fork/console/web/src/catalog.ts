@@ -816,6 +816,93 @@ const budgets: Service = {
   ],
 };
 
+const cloudFormation: Service = {
+  id: "cloudformation",
+  name: "CloudFormation",
+  category: "Management and governance",
+  resources: [
+    {
+      id: "stacks",
+      title: "Stacks",
+      key: keyAt("StackName"),
+      columns: [column("Stack name", "StackName"), column("Status", "StackStatus"), column("Created", "CreationTime"), column("Description", "Description")],
+      list: async (context) => {
+        const { CloudFormationClient, paginateDescribeStacks } = await import("@aws-sdk/client-cloudformation");
+        const client = new CloudFormationClient(clientConfig(context));
+        return items(await collect(paginateDescribeStacks({ client }, {}), (page) => page.Stacks));
+      },
+      children: [
+        {
+          id: "resources",
+          title: "Resources",
+          key: keyAt("LogicalResourceId"),
+          columns: [
+            column("Logical ID", "LogicalResourceId"),
+            column("Physical ID", "PhysicalResourceId"),
+            column("Type", "ResourceType"),
+            column("Status", "ResourceStatus"),
+          ],
+          list: async (context, stack) => {
+            const { CloudFormationClient, paginateListStackResources } = await import("@aws-sdk/client-cloudformation");
+            const client = new CloudFormationClient(clientConfig(context));
+            return items(
+              await collect(paginateListStackResources({ client }, { StackName: String(stack.StackName) }), (page) => page.StackResourceSummaries),
+            );
+          },
+        },
+      ],
+    },
+  ],
+};
+
+const sqs: Service = {
+  id: "sqs",
+  name: "SQS",
+  category: "Application integration",
+  resources: [
+    {
+      // ListQueues answers URLs only; the name is the URL's last path segment.
+      id: "queues",
+      title: "Queues",
+      key: keyAt("QueueName"),
+      columns: [column("Queue name", "QueueName"), column("URL", "QueueUrl")],
+      list: async (context) => {
+        const { SQSClient, paginateListQueues } = await import("@aws-sdk/client-sqs");
+        const client = new SQSClient(clientConfig(context));
+        const urls = await collect(paginateListQueues({ client }, {}), (page) => page.QueueUrls);
+        return urls.map((url) => ({ QueueName: url.slice(url.lastIndexOf("/") + 1), QueueUrl: url }));
+      },
+    },
+  ],
+};
+
+const eventBridge: Service = {
+  id: "events",
+  name: "EventBridge",
+  category: "Application integration",
+  resources: [
+    {
+      id: "rules",
+      title: "Rules on the default bus",
+      key: keyAt("Name"),
+      columns: [column("Rule name", "Name"), column("State", "State"), column("Event pattern", "EventPattern"), column("Schedule", "ScheduleExpression")],
+      list: async (context) => {
+        // The EventBridge client ships no paginator for ListRules, so the pages are walked here.
+        const { EventBridgeClient, ListRulesCommand } = await import("@aws-sdk/client-eventbridge");
+        const client = new EventBridgeClient(clientConfig(context));
+        const rules: object[] = [];
+        let NextToken: string | undefined;
+        do {
+          const page = await client.send(new ListRulesCommand({ NextToken }));
+          rules.push(...(page.Rules ?? []));
+          NextToken = page.NextToken;
+        } while (NextToken);
+        return items(rules);
+      },
+    },
+  ],
+};
+
 /** The account the signing keys belong to, which Budgets needs on every call. */
 export async function accountId(context: ApiContext): Promise<string> {
   const identity = await callerIdentity(context);
@@ -850,6 +937,9 @@ export const SERVICES: Service[] = [
   acm,
   wafv2,
   ssm,
+  cloudFormation,
+  sqs,
+  eventBridge,
   cloudWatch,
   cloudWatchLogs,
   budgets,
