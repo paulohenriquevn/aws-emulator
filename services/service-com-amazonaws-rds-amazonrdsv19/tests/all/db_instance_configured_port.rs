@@ -6,10 +6,10 @@
 //! the request set ("The port number on which the database accepts connections",
 //! `CreateDBInstance`). The Terraform AWS provider reads its `port` attribute from
 //! `Endpoint.Port`, so an instance that publishes an OS-assigned port instead shows a
-//! change on every plan after the first apply. The listener now takes the configured port
-//! on 127.0.0.1, or on another loopback address when that one is taken (so two instances
-//! can both serve 5432), and falls back to the listener range only where no extra
-//! loopback address routes.
+//! change on every plan after the first apply. When the request names a `Port`, the listener
+//! takes it on 127.0.0.1, or on another loopback address when that one is taken (so two
+//! instances can both serve 5432), and falls back to the listener range only where no
+//! extra loopback address routes. Without a `Port` the listener keeps a range port.
 
 use std::net::TcpListener;
 
@@ -118,4 +118,23 @@ async fn two_instances_created_with_one_port_both_publish_it() {
         endpoints[0].0, endpoints[1].0,
         "case two instances on one port: each needs its own address, got {endpoints:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_instance_created_without_a_port_keeps_a_listener_port_on_the_bind_address() {
+    // Only a `Port` the request names is honoured. Without one the listener takes a port
+    // from the core's range on the bind address, as upstream does, so parallel instances
+    // that all default to 5432 never contend for it.
+    let router = emulator();
+    let (address, published) =
+        available_instance(&router, "emu-default-port", "postgres", &[]).await;
+    assert_eq!(
+        address, "127.0.0.1",
+        "case no Port: the endpoint stays on the bind address, got {address}:{published}"
+    );
+    TcpStream::connect((address.as_str(), published))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("case no Port: the published endpoint must accept a connection: {error}")
+        });
 }

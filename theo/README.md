@@ -42,7 +42,7 @@ upstream ships the fix.
 | ACM | One DNS validation CNAME for a wildcard and its apex | aws/aws-emulator#536 |
 | SSM | EKS optimized AL2023 AMI parameters | aws/aws-emulator#535 |
 | TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |
-| RDS (and core listeners) | An instance listens on its configured `Port`, on another loopback address when 127.0.0.1 already serves it, so `Endpoint.Port` matches it | aws/aws-emulator#537 |
+| RDS (and core listeners) | An instance created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves it, so `Endpoint.Port` matches it | aws/aws-emulator#537 |
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 
 To find every patch: `git grep -n 'theo:' -- services vendor core`.
