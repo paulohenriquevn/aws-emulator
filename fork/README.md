@@ -49,7 +49,13 @@ npm ci && npm run build      # before cargo build, or /_console/ answers 503
 npm test                     # unit tests
 EMULATOR_BIN=$PWD/../../../target/debug/aws-emulator-fork npm run e2e   # against a real emulator
 EMULATOR_URL=https://localhost:9297 npm run dev   # dev server; API calls go to the emulator
+node --experimental-strip-types e2e/seed.ts https://localhost:9297 ~/.aws/emulator/9297   # one of everything
 ```
+
+The end-to-end suite seeds a fresh emulator with one resource of every type the console lists
+(`e2e/seed.ts`), then checks that each list page shows it, that its detail page opens with its
+child resources, and that no page shows a secret or parameter value. A resource type added to
+`src/catalog.ts` without a seed fails the suite.
 
 `cargo build` embeds `console/web/dist` in the binary. Without it the build still succeeds and
 prints a warning; set `AWS_EMULATOR_REQUIRE_CONSOLE=1` to make that an error, as CI does.
