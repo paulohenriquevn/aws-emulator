@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "fork/console",
     "fork/router",
     "services/service-com-amazonaws-accessanalyzer-accessanalyzer",
     "services/service-com-amazonaws-account-account",
@@ -924,6 +925,9 @@ engine = { path = "vendor/engine", package = "aws-emulator-engine" }
 emulator-core-build-support = { path = "vendor/build-support", package = "aws-emulator-build-support" }
 emulator-telemetry = { path = "vendor/emulator-telemetry", package = "aws-emulator-emulator-telemetry" }
 emulator-paths = { path = "vendor/emulator-paths", package = "aws-emulator-emulator-paths" }
+
+# The fork layer (fork/, see fork/README.md).
+aws-emulator-fork-console = { path = "fork/console" }
 
 # Public crates.io deps
 aws-smithy-schema = "0.2.1"

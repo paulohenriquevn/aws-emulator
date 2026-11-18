@@ -11,6 +11,7 @@ name = "aws-emulator-fork"
 path = "src/main.rs"
 
 [dependencies]
+aws-emulator-fork-console = { workspace = true }
 engine = { workspace = true }
 emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }

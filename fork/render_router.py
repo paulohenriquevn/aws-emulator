@@ -63,6 +63,7 @@ name = "aws-emulator-fork"
 path = "src/main.rs"
 
 [dependencies]
+aws-emulator-fork-console = {{ workspace = true }}
 engine = {{ workspace = true }}
 emulator-server = {{ workspace = true }}
 emulator-telemetry = {{ workspace = true }}
@@ -101,13 +102,23 @@ def render_lib(services: list[str]) -> str:
         "// SPDX-License-Identifier: CC0-1.0\n"
         + HEADER
         + "\n#![forbid(unsafe_code)]\n"
-        + "//! The services this fork mounts, on one endpoint. See fork/README.md.\n\n"
-        + "use smithy_server_runtime::MultiServiceRouter;\nuse std::sync::Arc;\npub use engine::InMemoryEngine;\n\n"
+        + "//! The services this fork mounts, on one endpoint, and the read-only console at\n"
+        + "//! `/_console/`. See fork/README.md.\n\n"
+        + "use emulator_server::WithExtraRoutes;\nuse smithy_server_runtime::MultiServiceRouter;\n"
+        + "use std::sync::Arc;\npub use engine::InMemoryEngine;\n\n"
         + "/// The service crates this router mounts, in registration order.\n"
         + f"pub const MOUNTED_SERVICES: [&str; {len(services)}] = [\n"
         + "".join(f'    "{s}",\n' for s in services)
         + "];\n\n"
-        + "pub fn build_router(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {\n"
+        + "/// The mounted services behind the console route: a console request is answered\n"
+        + "/// before SigV4 authentication or service dispatch, and every other request falls\n"
+        + "/// through to the services.\n"
+        + "pub fn build_router(engine: Arc<InMemoryEngine>) -> WithExtraRoutes<MultiServiceRouter> {\n"
+        + "    WithExtraRoutes::new(build_services(engine)).route_matching(\n"
+        + "        aws_emulator_fork_console::claims,\n"
+        + "        |request| async move { aws_emulator_fork_console::respond(&request) },\n"
+        + "    )\n}\n\n"
+        + "fn build_services(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {\n"
         + "    let router = MultiServiceRouter::new();\n"
         + calls
         + "\n    router\n}\n\n"

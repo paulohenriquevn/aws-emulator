@@ -11,6 +11,7 @@ account. Everything the fork adds lives in this directory, plus a few patches in
 | `services.txt` | The 22 AWS service crates the router mounts. The upstream router builds every service and needs about 100 GB of build output; ours builds only these. |
 | `render_router.py` | Generates `router/` from `services.txt`. `--check` fails when the generated files are stale. |
 | `router/` | The slim router crate. Its binary is `aws-emulator-fork`. |
+| `console/` | The read-only web console the binary serves at `/_console/`: a React app in `console/web` and the crate that embeds its build. |
 | `acceptance/` | Seven Terraform fixtures (billing, compute, data, edge, network, registry, security) and `run.sh`, which runs each one against a fresh emulator. |
 
 ## Usage
@@ -29,6 +30,29 @@ provider.
 The EC2 crate needs several GB of memory to compile. The workflow
 `.github/workflows/fork-acceptance.yml` runs the regression tests, the fixtures and the full suites
 of the patched services on every pull request.
+
+## Console
+
+The binary serves a read-only console at `https://localhost:9297/_console/`. It lists what the
+emulator holds in 20 services (EC2, VPC, S3, RDS, EKS, IAM and the rest of `services.txt` that has
+something to list), with a detail page per resource. The page calls the emulator's own AWS APIs
+from the browser with the AWS SDK for JavaScript, so it shows what any other client would read.
+
+Sign in with the keys in `~/.aws/emulator/9297/emulator_credentials` (any pair works with
+`--auth off`). The browser warns about the certificate because it comes from the emulator's own
+CA; accept it, or trust `~/.aws/emulator/9297/ca.pem`. The keys stay in the tab's session storage.
+The console never reads a secret or parameter value, only the metadata the list calls return.
+
+```bash
+cd fork/console/web
+npm ci && npm run build      # before cargo build, or /_console/ answers 503
+npm test                     # unit tests
+EMULATOR_BIN=$PWD/../../../target/debug/aws-emulator-fork npm run e2e   # against a real emulator
+EMULATOR_URL=https://localhost:9297 npm run dev   # dev server; API calls go to the emulator
+```
+
+`cargo build` embeds `console/web/dist` in the binary. Without it the build still succeeds and
+prints a warning; set `AWS_EMULATOR_REQUIRE_CONSOLE=1` to make that an error, as CI does.
 
 ## Patches to upstream crates
 

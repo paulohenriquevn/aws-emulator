@@ -24,6 +24,8 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   # One rustc at a time: the EC2 crate alone peaks at several GB.
   CARGO_BUILD_JOBS: "1"
+  # A binary built here must carry the console (fork/console/build.rs).
+  AWS_EMULATOR_REQUIRE_CONSOLE: "1"
 
 jobs:
   acceptance:
@@ -63,8 +65,25 @@ jobs:
           terraform_version: 1.16.4
           terraform_wrapper: false
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fork/console/web/package-lock.json
+
       - name: The slim router matches fork/services.txt
         run: python3 fork/render_router.py --check
+
+      - name: Console unit tests and build
+        working-directory: fork/console/web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Console file serving tests
+        run: cargo test -p aws-emulator-fork-console
 
       - name: Regression tests for the fixed gaps
         run: >-
@@ -102,6 +121,18 @@ jobs:
       - name: Build the emulator
         run: cargo build -p aws-emulator-fork-router
 
+      - name: The router answers console requests before the services
+        run: cargo test -p aws-emulator-fork-router --test console_route
+
+      - name: Console end to end against the emulator
+        working-directory: fork/console/web
+        env:
+          EMULATOR_BIN: ${{ github.workspace }}/target/debug/aws-emulator-fork
+          CONSOLE_E2E_HOME: ${{ runner.temp }}/console-e2e
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+
       - name: Terraform acceptance fixtures
         env:
           ACCEPTANCE_WORK: ${{ runner.temp }}/acceptance
@@ -125,4 +156,6 @@ jobs:
           path: |
             ${{ runner.temp }}/acceptance/*/terraform.log
             ${{ runner.temp }}/acceptance/*/home/emulator.log
+            fork/console/web/test-results/
+            ${{ runner.temp }}/console-e2e/emulator.log
           if-no-files-found: ignore

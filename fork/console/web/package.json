@@ -1,0 +1,52 @@
+{
+  "name": "aws-emulator-console",
+  "private": true,
+  "description": "The read-only web console the emulator serves at /_console/.",
+  "license": "CC0-1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-acm": "3.1171.0",
+    "@aws-sdk/client-auto-scaling": "3.1171.0",
+    "@aws-sdk/client-budgets": "3.1171.0",
+    "@aws-sdk/client-cloudfront": "3.1171.0",
+    "@aws-sdk/client-cloudwatch": "3.1171.0",
+    "@aws-sdk/client-cloudwatch-logs": "3.1171.0",
+    "@aws-sdk/client-ec2": "3.1171.0",
+    "@aws-sdk/client-ecr": "3.1171.0",
+    "@aws-sdk/client-eks": "3.1171.0",
+    "@aws-sdk/client-elastic-load-balancing-v2": "3.1171.0",
+    "@aws-sdk/client-elasticache": "3.1171.0",
+    "@aws-sdk/client-iam": "3.1171.0",
+    "@aws-sdk/client-kms": "3.1171.0",
+    "@aws-sdk/client-rds": "3.1171.0",
+    "@aws-sdk/client-route-53": "3.1171.0",
+    "@aws-sdk/client-s3": "3.1171.0",
+    "@aws-sdk/client-secrets-manager": "3.1171.0",
+    "@aws-sdk/client-ssm": "3.1171.0",
+    "@aws-sdk/client-sts": "3.1171.0",
+    "@aws-sdk/client-wafv2": "3.1171.0",
+    "@cloudscape-design/collection-hooks": "1.0.111",
+    "@cloudscape-design/components": "3.0.1419",
+    "@cloudscape-design/global-styles": "1.0.72",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-router-dom": "7.18.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vitest": "5.1.0"
+  }
+}
