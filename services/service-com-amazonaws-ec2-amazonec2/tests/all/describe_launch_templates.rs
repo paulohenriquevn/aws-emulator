@@ -612,6 +612,9 @@ async fn a_next_token_this_service_did_not_issue_is_refused() {
 /// message — and a name no template carries is refused with the name's own not-found code.
 #[tokio::test]
 async fn an_id_or_a_name_that_names_no_template_is_refused() {
+    // fork: `lt-0000000000000ffff` instead of `lt-00000000000000099`. this fork seeds the EKS
+    // optimized AMIs, which draw on the same id counter, so the counter reaches 0x99
+    // before this test runs and that id stops being one no resource holds.
     let (router, engine) = crate::ec2_query::emulator();
     let created = create_every_template(&router).await;
     let known = created
@@ -637,7 +640,7 @@ async fn an_id_or_a_name_that_names_no_template_is_refused() {
             "sg-00000000000000001",
         ]),
         ("two ids naming no template", vec![
-            "lt-00000000000000099",
+            "lt-0000000000000ffff",
             "lt-0fedcba987654321f",
         ]),
     ];
@@ -674,7 +677,7 @@ async fn an_id_or_a_name_that_names_no_template_is_refused() {
         &router,
         &[
             p("LaunchTemplateId.1", known.clone()),
-            p("LaunchTemplateId.2", "lt-00000000000000099"),
+            p("LaunchTemplateId.2", "lt-0000000000000ffff"),
         ],
     )
     .await;
@@ -685,7 +688,7 @@ async fn an_id_or_a_name_that_names_no_template_is_refused() {
     );
     assert_eq!(
         error_message(&body),
-        "The following launch template ids are malformed: lt-00000000000000099",
+        "The following launch template ids are malformed: lt-0000000000000ffff",
         "case \"a known id beside an unknown one\": the refusal must name only the id that \
          names no template, got {body}"
     );

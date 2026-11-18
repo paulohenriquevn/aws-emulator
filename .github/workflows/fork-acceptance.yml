@@ -1,0 +1,249 @@
+# fork: proves the gaps this fork fixes for Terraform stay fixed.
+#
+# One job, so every step reuses the same target directory: the EC2 crate alone needs
+# several GB of memory to compile, and building it twice would double the bill.
+name: fork acceptance
+
+on:
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+    inputs:
+      emulator-run-id:
+        description: >-
+          Run only the kubernetes job, on the emulator binary an earlier run of this
+          workflow built (its run id). Empty runs everything.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  # The kubernetes job reads another run's emulator binary when emulator-run-id is set.
+  actions: read
+
+concurrency:
+  group: acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # No debug info: it is most of rustc's peak memory on the EC2 crate.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  # One rustc at a time: the EC2 crate alone peaks at several GB.
+  CARGO_BUILD_JOBS: "1"
+  # A binary built here must carry the console (fork/console/build.rs).
+  AWS_EMULATOR_REQUIRE_CONSOLE: "1"
+
+jobs:
+  acceptance:
+    if: ${{ !inputs.emulator-run-id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Make room for the EC2 crate
+        # The hosted runner has about 7 GB of memory; without swap, rustc on the EC2
+        # crate takes the runner down (exit 143 with no post steps).
+        run: |
+          # The build needs well over the 18 GB the runner leaves free on /: drop the
+          # preinstalled toolchains this job never uses.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell \
+            /usr/local/share/chromium /usr/local/lib/node_modules
+          sudo docker image prune -af >/dev/null
+          sudo swapoff -a
+          sudo rm -f /swapfile /mnt/swapfile
+          sudo fallocate -l 10G /swapfile-ci
+          sudo chmod 600 /swapfile-ci
+          sudo mkswap /swapfile-ci
+          sudo swapon /swapfile-ci
+          free -h
+          df -h
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # A red run still keeps the compiled EC2 crate for the next one.
+          cache-on-failure: true
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fork/console/web/package-lock.json
+
+      - name: The slim router matches fork/services.txt
+        run: python3 fork/render_router.py --check
+
+      - name: Console unit tests and build
+        working-directory: fork/console/web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Console file serving tests
+        run: cargo test -p aws-emulator-fork-console
+
+      - name: Regression tests for the fixed gaps
+        run: >-
+          cargo test
+          -p service-com-amazonaws-ec2-amazonec2
+          -p service-com-amazonaws-acm-certificatemanager
+          -p service-com-amazonaws-ssm-amazonssm
+          -p service-com-amazonaws-rds-amazonrdsv19
+          -p service-com-amazonaws-elasticache-amazonelasticachev9
+          -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
+          --test all --
+          network_acl_tags
+          security_group_all_protocols_revoke
+          wildcard_dns_validation_record
+          public_eks_optimized_ami_hierarchies
+          db_instance_configured_port
+          replication_group_deletion
+          default_rule_tags
+          unsigned_query_calls
+
+      - name: The TLS test fails without the account-prefixed localhost name
+        run: |
+          sed -i '/names.insert(1, format!("{}.localhost"/d' vendor/server/src/tls_certificate_authority.rs
+          if grep -q 'names.insert(1' vendor/server/src/tls_certificate_authority.rs; then
+            echo "the mutation did not apply" >&2; exit 1
+          fi
+          # Red means THIS test failed, not that the build broke.
+          cargo test -p aws-emulator-fork-router --test tls_certificate 2>&1 | tee tls-red.log || true
+          if ! grep -q 'the_certificate_verifies_an_account_prefixed_localhost_host ... FAILED' tls-red.log; then
+            echo "the TLS test did not fail on the account-prefixed name, so it does not guard the fix" >&2
+            exit 1
+          fi
+          git restore vendor/server/src/tls_certificate_authority.rs
+
+      - name: The TLS test passes with the fix
+        run: cargo test -p aws-emulator-fork-router --test tls_certificate
+
+      - name: Build the emulator
+        run: cargo build -p aws-emulator-fork-router
+
+      - name: Keep the emulator binary
+        # So the console can be tried on a machine that cannot compile the EC2 crate.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aws-emulator-fork-linux-x64
+          path: target/debug/aws-emulator-fork
+          retention-days: 7
+
+      - name: The router answers console requests before the services
+        run: cargo test -p aws-emulator-fork-router --test console_route
+
+      - name: EC2 instance state changes reach EventBridge
+        run: cargo test -p aws-emulator-fork-router --test ec2_instance_state_events
+
+      - name: Workload identity for a cluster outside the emulator
+        run: >-
+          cargo test
+          -p aws-emulator-fork-router --test external_cluster_identity
+
+      - name: Unit tests of the workload identity patches
+        run: >-
+          cargo test --lib
+          -p service-common
+          -p aws-emulator-fork-service-account-issuers
+          -p service-com-amazonaws-eksauth-eksauthfrontend
+          -p service-com-amazonaws-sts-awssecuritytokenservicev20110615
+
+      - name: Console end to end against the emulator
+        working-directory: fork/console/web
+        env:
+          EMULATOR_BIN: ${{ github.workspace }}/target/debug/aws-emulator-fork
+          CONSOLE_E2E_HOME: ${{ runner.temp }}/console-e2e
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+
+      - name: Terraform acceptance fixtures
+        env:
+          ACCEPTANCE_WORK: ${{ runner.temp }}/acceptance
+        run: fork/acceptance/run.sh target/debug/aws-emulator-fork
+
+      - name: Full test suites of the patched services
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo test --no-fail-fast
+          -p service-com-amazonaws-ec2-amazonec2
+          -p service-com-amazonaws-acm-certificatemanager
+          -p service-com-amazonaws-ssm-amazonssm
+          -p service-com-amazonaws-rds-amazonrdsv19
+          -p service-com-amazonaws-elasticache-amazonelasticachev9
+          -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
+
+      - name: Keep the acceptance logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: acceptance-logs
+          path: |
+            ${{ runner.temp }}/acceptance/*/terraform.log
+            ${{ runner.temp }}/acceptance/*/home/emulator.log
+            fork/console/web/test-results/
+            ${{ runner.temp }}/console-e2e/emulator.log
+          if-no-files-found: ignore
+
+  kubernetes:
+    # Real controllers and real workload identity in a kind cluster that signs as the
+    # emulator's EKS cluster (fork/kubernetes/run.sh), on the binary the acceptance job built.
+    needs: acceptance
+    if: ${{ !cancelled() && (needs.acceptance.result == 'success' || inputs.emulator-run-id) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install kind
+        run: |
+          curl -sSfLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          kind version
+          kubectl version --client
+          helm version
+          aws --version
+
+      - name: Fetch the emulator binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: aws-emulator-fork-linux-x64
+          path: ${{ runner.temp }}/bin
+          run-id: ${{ inputs.emulator-run-id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Controllers and workload identity in kind
+        env:
+          KUBERNETES_WORK: ${{ runner.temp }}/kubernetes
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/aws-emulator-fork"
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo add opencost https://opencost.github.io/opencost-helm-chart
+          helm repo update
+          fork/kubernetes/run.sh "$RUNNER_TEMP/bin/aws-emulator-fork"
+
+      - name: Keep the kind logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kubernetes-logs
+          path: |
+            ${{ runner.temp }}/kubernetes/*.log
+            ${{ runner.temp }}/kubernetes/*.json
+            ${{ runner.temp }}/kubernetes/diagnostics/
+          if-no-files-found: ignore

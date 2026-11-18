@@ -689,12 +689,20 @@ async fn dns_validation_records_are_per_certificate_and_per_domain() {
 
     // Per domain: within one certificate, each name has its own CNAME, and a wildcard
     // name is validated through the domain it wildcards.
-    let names: Vec<&String> = first_records.iter().map(|(_, name, _)| name).collect();
-    for (index, name) in names.iter().enumerate() {
-        assert!(
-            !names[index + 1..].contains(name),
-            "expected a distinct validation record per domain name, got {names:?}"
-        );
+    // fork: a wildcard shares its apex's record ("How CNAME records for ACM work", ACM
+    // User Guide), so distinct means distinct per name once the `*.` is dropped.
+    let names: Vec<(&str, &String)> = first_records
+        .iter()
+        .map(|(domain, name, _)| (domain.trim_start_matches("*."), name))
+        .collect();
+    for (index, (proven, name)) in names.iter().enumerate() {
+        for (other_proven, other_name) in &names[index + 1..] {
+            assert_eq!(
+                proven == other_proven,
+                name == other_name,
+                "expected one validation record per proven name, got {names:?}"
+            );
+        }
     }
     let wildcard = first_records
         .iter()

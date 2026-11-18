@@ -21,11 +21,19 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# fork: tokens of an EKS cluster whose control plane runs outside the emulator are
+# verified against the key set registered for its issuer, and resolved against the EKS
+# cluster, its pod identity associations and the IAM role they name.
+service-common = { path = "../common" }
+service-com-amazonaws-eks-awswesleyfrontend = { workspace = true }
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
+# fork: the external cluster tests sign their own tokens.
+ring = "0.17"
 hex = { workspace = true }
 sha2 = { workspace = true }
 

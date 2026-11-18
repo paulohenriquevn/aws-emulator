@@ -261,6 +261,11 @@
 //! string every SDK bound to such a member parses, rather than as the protocol's default
 //! epoch-seconds number.
 
+// fork: the key sets of service account issuers whose control plane runs outside the
+// emulator (a local Kubernetes cluster standing in for an EKS cluster).
+pub mod service_account_issuers;
+// fork: role sessions another service issues credentials for, which STS reports.
+pub mod assumed_role_sessions;
 pub mod rds_cluster_parameters;
 /// The event source types the one `rds` front door accepts, and the sentence it refuses a
 /// `SourceType` outside them with — one set for the three service views it serves.

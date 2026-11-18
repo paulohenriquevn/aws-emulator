@@ -3419,11 +3419,15 @@ pub fn domain_validation_record(
     };
     match validation_method {
         "DNS" => {
-            let name = validation_label(certificate_id, domain_name, "dns-name");
+            // fork: minted from the name ACM proves control of, so `*.example.com` and
+            // `example.com` share one CNAME, owned by the apex, as AWS reports them (ACM
+            // User Guide, "DNS validation").
+            let proven = target.to_ascii_lowercase();
+            let name = validation_label(certificate_id, &proven, "dns-name");
             record.resource_record = Some(ResourceRecord {
                 name: format!("_{name}.{target}."),
                 r#type: RECORD_TYPE_CNAME.to_string(),
-                value: acm_validations_cname_target(certificate_id, domain_name),
+                value: acm_validations_cname_target(certificate_id, &proven),
             });
         }
         "HTTP" => {

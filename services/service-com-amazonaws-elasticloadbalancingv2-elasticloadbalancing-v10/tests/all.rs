@@ -33,6 +33,8 @@ mod certificate_consumer_registry;
 mod certificate_resolution_and_redirect_protocol;
 #[path = "all/declared_action_set.rs"]
 mod declared_action_set;
+#[path = "all/default_rule_tags.rs"]
+mod default_rule_tags;
 #[path = "all/describe_input_bounds.rs"]
 mod describe_input_bounds;
 #[path = "all/forward_action_config_and_mutual_authentication.rs"]
@@ -103,6 +105,8 @@ mod tag_not_found_wording_by_kind;
 mod tag_removal;
 #[path = "all/tag_writes.rs"]
 mod tag_writes;
+#[path = "all/unsigned_query_calls.rs"]
+mod unsigned_query_calls;
 #[path = "all/target_deregistration_and_health_spans.rs"]
 mod target_deregistration_and_health_spans;
 #[path = "all/target_group_attribute_writes.rs"]

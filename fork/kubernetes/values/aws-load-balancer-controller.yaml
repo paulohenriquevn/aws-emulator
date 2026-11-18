@@ -1,0 +1,20 @@
+replicaCount: 1
+# The emulator does not serve Shield Advanced, WAF Classic or WAFv2 lookups the controller
+# makes for every Ingress when these are on.
+enableShield: false
+enableWaf: false
+enableWafv2: false
+logLevel: debug
+# AWS_CA_BUNDLE reaches only the SDK's default HTTP client; SSL_CERT_FILE is what Go's
+# own TLS stack trusts, whatever client a component builds.
+env:
+  AWS_CA_BUNDLE: /etc/emulator/ca.pem
+  SSL_CERT_FILE: /etc/emulator/ca.pem
+extraVolumes:
+- name: emulator-ca
+  configMap:
+    name: emulator-ca
+extraVolumeMounts:
+- name: emulator-ca
+  mountPath: /etc/emulator
+  readOnly: true

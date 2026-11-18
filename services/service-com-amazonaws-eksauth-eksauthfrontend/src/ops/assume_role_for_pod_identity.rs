@@ -233,6 +233,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // dropped before the credential store is touched.
         let now = SystemTime::now();
         let expired = state.lock().expire(now);
+        // fork: STS stops reporting an expired session too.
+        let assumed_role_sessions = (&*self.engine as &dyn ::std::any::Any)
+            .downcast_ref::<::engine::InMemoryEngine>()
+            .map(|engine| engine.state::<::service_common::assumed_role_sessions::AssumedRoleSessions>());
+        if let Some(sessions) = &assumed_role_sessions {
+            let mut sessions = sessions.lock();
+            for access_key_id in &expired {
+                sessions.forget(access_key_id);
+            }
+        }
         for access_key_id in expired {
             match ctx.credential_store().delete(&access_key_id) {
                 Ok(()) => ::tracing::info!(
@@ -251,9 +261,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // fork: a cluster this crate's records do not hold may be an EKS cluster whose
+        // control plane runs outside the emulator, with a registered key set for its
+        // issuer (`crate::state::external_clusters`).
+        let region = ::service_com_amazonaws_eks_awswesleyfrontend::state::request_region(ctx.parts());
+        let registered_here = state.lock().cluster(&input.cluster_name).is_some();
+        let external = if registered_here {
+            None
+        } else {
+            crate::state::external_clusters::authorize(&*self.engine, &region, &input.cluster_name, &input.token, now)
+        };
+
         // The whole authorization decision reads state: the cluster, its token signing
         // key, and its associations.
-        let (association, identity) = {
+        let (association, identity) = if let Some(outcome) = external {
+            outcome.map_err(|refusal| {
+                use crate::state::external_clusters::ExternalRefusal;
+                match refusal {
+                    ExternalRefusal::Invalid => {
+                        refused(&caller_akid, &input.cluster_name, "InvalidTokenException");
+                        token_rejection(TokenRejection::Invalid)
+                    }
+                    ExternalRefusal::Expired => {
+                        refused(&caller_akid, &input.cluster_name, "ExpiredTokenException");
+                        token_rejection(TokenRejection::Expired)
+                    }
+                    ExternalRefusal::NoAssociation(identity) => {
+                        refused(&caller_akid, &input.cluster_name, "AccessDeniedException");
+                        access_denied(&input.cluster_name, &identity)
+                    }
+                }
+            })?
+        } else {
             let guard = state.lock();
             // RESOLVING THE KEY THE HEADER NAMES is the last layer of reading that
             // header: a `kid` is resolved through the OIDC provider of the cluster the
@@ -341,6 +380,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             instance_id: input.instance_id.clone(),
             zone: input.zone.clone(),
         };
+        // fork: record who the credentials are for STS, which reports a request signed
+        // with them as the role's session (`assumed-role/<role>/eks-...`).
+        if let Some(sessions) = &assumed_role_sessions {
+            let session_name = assume_role_id.split_once(':').map_or(assume_role_id.as_str(), |(_, name)| name);
+            match ::service_common::assumed_role_sessions::AssumedRoleSession::of_role(
+                &association.role_arn,
+                &association.role_id,
+                session_name,
+                expiration,
+            ) {
+                Some(assumed) => sessions.lock().record(&minted.id, assumed, now),
+                None => ::tracing::warn!(
+                    operation = Self::NAME,
+                    role_arn = %association.role_arn,
+                    "the associated role ARN is not a role ARN; STS will not report this session"
+                ),
+            }
+        }
         state
             .lock()
             .sessions

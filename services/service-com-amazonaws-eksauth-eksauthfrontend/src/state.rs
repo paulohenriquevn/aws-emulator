@@ -47,6 +47,10 @@
 //! only: nothing in them is ever trusted, since who a token names comes from the issuing
 //! cluster's record.
 
+
+// fork: tokens of an EKS cluster whose control plane runs outside the emulator.
+pub mod external_clusters;
+
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::fmt::Write as _;

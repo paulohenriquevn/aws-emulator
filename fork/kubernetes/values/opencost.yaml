@@ -1,0 +1,13 @@
+# OpenCost without Prometheus (its collector data source), pricing nodes from the EC2
+# price list file the emulator publishes.
+opencost:
+  exporter:
+    collectorDataSource:
+      enabled: true
+    extraEnv:
+      AWS_PRICING_URL: http://price-list.opencost.svc/index.json
+  prometheus:
+    internal:
+      enabled: false
+  ui:
+    enabled: false

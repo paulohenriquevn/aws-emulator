@@ -1,0 +1,42 @@
+# Serves the EC2 price list file run.sh fetched from the emulator (node mount /price-list)
+# at http://price-list.opencost.svc/index.json, the URL OpenCost is given.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: price-list
+  namespace: opencost
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: price-list
+  template:
+    metadata:
+      labels:
+        app: price-list
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.29.3-alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: price-list
+          mountPath: /usr/share/nginx/html
+          readOnly: true
+      volumes:
+      - name: price-list
+        hostPath:
+          path: /price-list
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: price-list
+  namespace: opencost
+spec:
+  selector:
+    app: price-list
+  ports:
+  - port: 80

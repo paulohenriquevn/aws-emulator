@@ -1,0 +1,42 @@
+# The AWS services the router mounts.
+# One crate directory name per line, relative to services/.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615
+service-com-amazonaws-iam-awsidentitymanagementv20100508
+service-com-amazonaws-kms-trentservice
+service-com-amazonaws-s3-amazons3
+# The Terraform AWS provider (6.23+) reads and writes S3 bucket tags through S3 Control.
+service-com-amazonaws-s3control-awss3controlservicev20180820
+service-com-amazonaws-ssm-amazonssm
+service-com-amazonaws-secretsmanager-secretsmanager
+service-com-amazonaws-ec2-amazonec2
+service-com-amazonaws-ecr-amazonec2containerregistry-v20150921
+service-com-amazonaws-budgets-awsbudgetservicegateway
+service-com-amazonaws-rds-amazonrdsv19
+service-com-amazonaws-elasticache-amazonelasticachev9
+service-com-amazonaws-eks-awswesleyfrontend
+service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
+# ELBv2 signs as `elasticloadbalancing`, the name Classic ELB owns; the Classic crate is the
+# front door that hands an ELBv2 request (Version 2015-12-01) to the ELBv2 model.
+service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7
+service-com-amazonaws-cloudfront-cloudfront2020-05-31
+service-com-amazonaws-wafv2-awswaf-20190729
+service-com-amazonaws-acm-certificatemanager
+service-com-amazonaws-route53-awsdnsv20130401
+service-com-amazonaws-cloudwatchlogs-logs-20140328
+service-com-amazonaws-cloudwatch-graniteserviceversion20100801
+service-com-amazonaws-autoscaling-autoscaling-2011-01-01
+# Cluster API (CAPA) and in-cluster controllers on the operations cluster:
+# `clusterawsadm bootstrap iam` creates the CAPA roles through a CloudFormation stack;
+# CAPA's optional instance-state events go EventBridge -> SQS;
+# the AWS Load Balancer Controller asks Shield for the subscription state;
+# OpenCost reads the EC2 price list file the Price List API publishes (GetPriceListFileUrl).
+service-com-amazonaws-cloudformation-cloudformation
+service-com-amazonaws-sqs-amazonsqs
+service-com-amazonaws-eventbridge-awsevents
+service-com-amazonaws-shield-awsshield-20160616
+service-com-amazonaws-pricing-awspricelistservice
+# EKS Pod Identity: the EKS Pod Identity Agent exchanges a pod's service account token for
+# credentials. With a local Kubernetes cluster standing in for an EKS cluster's control
+# plane, the token is verified against the key set registered for the cluster's issuer
+# (fork/service-account-issuers).
+service-com-amazonaws-eksauth-eksauthfrontend

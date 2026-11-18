@@ -31,6 +31,9 @@ mod modeled_error_surfaces;
 mod rbac_users;
 #[path = "all/replication_group_lifecycle.rs"]
 mod replication_group_lifecycle;
+// fork: DeleteReplicationGroup, which Terraform destroys a replication group with.
+#[path = "all/replication_group_deletion.rs"]
+mod replication_group_deletion;
 #[path = "all/reserved_cache_nodes.rs"]
 mod reserved_cache_nodes;
 #[path = "all/reserved_cache_nodes_offerings.rs"]
