@@ -2484,6 +2484,8 @@ mod instance_ids_and_instance_types;
 /// projection reaches it as `crate::state::region_display` like any other primitive here.
 mod availability_zone_display;
 mod instances_and_filters;
+// fork: EC2 instance state-change events on EventBridge.
+pub mod instance_state_events;
 mod vpcs_and_security_groups;
 mod store;
 /// The bundle-task store's identity and refusals: the prefix a bundle task id carries, the
@@ -2499,6 +2501,9 @@ pub use parameter_bounds::*;
 pub use store::*;
 pub use vpcs_and_security_groups::*;
 pub use instances_and_filters::*;
+pub use instance_state_events::{
+    drive_instance_state_clock, publish_instance_state_events, InstanceStateEvent, InstanceStateEvents,
+};
 pub use instance_ids_and_instance_types::*;
 pub use availability_zone_display::*;
 pub use local_gateways_and_filter_patterns::*;
