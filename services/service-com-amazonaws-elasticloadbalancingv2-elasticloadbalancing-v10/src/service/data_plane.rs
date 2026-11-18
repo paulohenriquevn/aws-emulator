@@ -1482,6 +1482,12 @@ fn forward(
         listener_protocol: listener.protocol.clone(),
         listener_port: listener.port,
         target_group_arn: group.arn.clone(),
+        set_cookie: (distribution.sticky && pinned.is_none()).then(|| {
+            super::target_group_selection::set_cookie(
+                &group.arn,
+                distribution.sticky_duration_seconds,
+            )
+        }),
     }))
 }
 

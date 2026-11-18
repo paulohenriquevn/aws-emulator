@@ -72,6 +72,9 @@ pub(super) struct Proxied {
     pub(super) listener_protocol: Option<String>,
     pub(super) listener_port: Option<i32>,
     pub(super) target_group_arn: String,
+    /// The target-group stickiness cookie the answer hands back, for a client that does not
+    /// hold it yet, as a `lambda` target's answer does.
+    pub(super) set_cookie: Option<String>,
 }
 
 /// A registered target, as the target group's type names it.
@@ -120,7 +123,12 @@ pub(super) async fn served<Eng: Send + Sync + 'static>(
         return Served::status(TARGET_UNREACHABLE_STATUS);
     };
     match exchange(&address, proxied, request, body).await {
-        Ok(served) => served,
+        Ok(mut served) => {
+            if let Some(field) = proxied.set_cookie.clone() {
+                served.headers.push(("set-cookie".to_string(), field));
+            }
+            served
+        }
         Err(Failure::TimedOut) => {
             tracing::warn!(target_group = %proxied.target_group_arn, %address, port = proxied.port, "the target did not answer in time");
             Served::status(TARGET_TIMEOUT_STATUS)
@@ -268,6 +276,7 @@ mod tests {
             listener_protocol: Some("HTTP".to_string()),
             listener_port: Some(80),
             target_group_arn: "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/t/1".to_string(),
+            set_cookie: None,
         }
     }
 
