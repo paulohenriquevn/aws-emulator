@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - The fork's layer lives in `fork/`, its router crate is `aws-emulator-fork-router`, its binary is `aws-emulator-fork`, and `run.sh` reads `ACCEPTANCE_WORK` and `ACCEPTANCE_PORT`; the names no longer carry the downstream project's name (#2)
 
 ### Fixed
+- The Price List API's EC2 instance products carry `marketoption` `OnDemand`, without which OpenCost prices no node from the price list (#2)
 - EC2 accepts `CreateTags` and `DeleteTags` on network ACLs, the default one included (#1)
 - EC2 revokes an all-protocols security group rule whatever port range the request names (#1)
 - ACM reports the same DNS validation record for a wildcard name as for its apex (#1)
