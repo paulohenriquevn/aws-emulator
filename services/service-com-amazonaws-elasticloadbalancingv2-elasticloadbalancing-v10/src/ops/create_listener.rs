@@ -333,6 +333,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .collect(),
             list_certificate_arns: Vec::new(),
             default_rule_id: String::new(),
+            default_rule_tags: std::collections::HashMap::new(),
             rules: Vec::new(),
         };
 

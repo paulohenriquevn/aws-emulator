@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - The fork's layer lives in `fork/`, its router crate is `aws-emulator-fork-router`, its binary is `aws-emulator-fork`, and `run.sh` reads `ACCEPTANCE_WORK` and `ACCEPTANCE_PORT`; the names no longer carry the downstream project's name (#2)
 
 ### Fixed
+- Elastic Load Balancing v2 `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule instead of answering `RuleNotFound`, so the AWS Load Balancer Controller can reconcile an Ingress (#2)
 - STS `GetCallerIdentity` reports credentials from EKS Auth `AssumeRoleForPodIdentity` as the associated role's session, not as the emulator's own user (#2)
 - The Price List API's EC2 instance products carry `marketoption` `OnDemand`, without which OpenCost prices no node from the price list (#2)
 - EC2 accepts `CreateTags` and `DeleteTags` on network ACLs, the default one included (#1)

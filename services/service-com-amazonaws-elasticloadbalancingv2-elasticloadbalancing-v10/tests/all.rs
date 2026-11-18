@@ -33,6 +33,8 @@ mod certificate_consumer_registry;
 mod certificate_resolution_and_redirect_protocol;
 #[path = "all/declared_action_set.rs"]
 mod declared_action_set;
+#[path = "all/default_rule_tags.rs"]
+mod default_rule_tags;
 #[path = "all/describe_input_bounds.rs"]
 mod describe_input_bounds;
 #[path = "all/forward_action_config_and_mutual_authentication.rs"]

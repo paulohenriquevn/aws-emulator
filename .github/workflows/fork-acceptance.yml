@@ -103,6 +103,7 @@ jobs:
           -p service-com-amazonaws-ssm-amazonssm
           -p service-com-amazonaws-rds-amazonrdsv19
           -p service-com-amazonaws-elasticache-amazonelasticachev9
+          -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
           --test all --
           network_acl_tags
           security_group_all_protocols_revoke
@@ -110,6 +111,7 @@ jobs:
           public_eks_optimized_ami_hierarchies
           db_instance_configured_port
           replication_group_deletion
+          default_rule_tags
 
       - name: The TLS test fails without the account-prefixed localhost name
         run: |
@@ -181,6 +183,7 @@ jobs:
           -p service-com-amazonaws-ssm-amazonssm
           -p service-com-amazonaws-rds-amazonrdsv19
           -p service-com-amazonaws-elasticache-amazonelasticachev9
+          -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
 
       - name: Keep the acceptance logs
         if: ${{ !cancelled() }}
