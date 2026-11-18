@@ -380,7 +380,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 "AvailabilityZone can't be specified when MultiAZ is enabled",
             ));
         }
-        // theo: only a `Port` the request names is a port the engine listener must take; with
+        // fork: only a `Port` the request names is a port the engine listener must take; with
         // none, the listener keeps a port from the core's range, as upstream does. Terraform
         // only plans a port change when its configuration names one.
         let requested_port = input.port;
@@ -931,7 +931,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 role: crate::state::EndpointRole::ClusterMember(record.identifier.clone()),
                 reader: false,
                 storage: Some(storage),
-                // theo: a cluster member is reached on the cluster's port, which the
+                // fork: a cluster member is reached on the cluster's port, which the
                 // cluster's own listener took.
                 preferred_port: None,
             }),
@@ -949,7 +949,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // endpoint is opened for it.
                     reader: false,
                     storage: None,
-                    // theo: listen on the configured `Port`, which `Endpoint.Port` publishes.
+                    // fork: listen on the configured `Port`, which `Endpoint.Port` publishes.
                     preferred_port: requested_port.and_then(|port| u16::try_from(port).ok()),
                 }
             }),

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteReplicationGroup
-//! theo: implemented in the theo fork. The Terraform AWS provider destroys an
+//! fork: implemented in this fork. The Terraform AWS provider destroys an
 //! `aws_elasticache_replication_group` with this operation, so the scaffolded 501 left
 //! every stack holding one undestroyable.
 //!

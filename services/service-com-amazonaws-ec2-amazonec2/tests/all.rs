@@ -15,10 +15,10 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
-// theo: CreateTags/DeleteTags on network ACLs, the default one included (aws/aws-emulator#76).
+// fork: CreateTags/DeleteTags on network ACLs, the default one included (aws/aws-emulator#76).
 #[path = "all/network_acl_tags.rs"]
 mod network_acl_tags;
-// theo: an all-protocols revoke matches whatever ports it names (aws/aws-emulator#46).
+// fork: an all-protocols revoke matches whatever ports it names (aws/aws-emulator#46).
 #[path = "all/security_group_all_protocols_revoke.rs"]
 mod security_group_all_protocols_revoke;
 // The RECORDED response elements a reported shape carries that this checkout's model

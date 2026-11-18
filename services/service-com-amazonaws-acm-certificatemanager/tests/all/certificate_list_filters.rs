@@ -689,7 +689,7 @@ async fn dns_validation_records_are_per_certificate_and_per_domain() {
 
     // Per domain: within one certificate, each name has its own CNAME, and a wildcard
     // name is validated through the domain it wildcards.
-    // theo: a wildcard shares its apex's record ("How CNAME records for ACM work", ACM
+    // fork: a wildcard shares its apex's record ("How CNAME records for ACM work", ACM
     // User Guide), so distinct means distinct per name once the `*.` is dropped.
     let names: Vec<(&str, &String)> = first_records
         .iter()

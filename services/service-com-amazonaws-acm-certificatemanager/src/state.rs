@@ -3419,7 +3419,7 @@ pub fn domain_validation_record(
     };
     match validation_method {
         "DNS" => {
-            // theo: minted from the name ACM proves control of, so `*.example.com` and
+            // fork: minted from the name ACM proves control of, so `*.example.com` and
             // `example.com` share one CNAME, owned by the apex, as AWS reports them (ACM
             // User Guide, "DNS validation").
             let proven = target.to_ascii_lowercase();

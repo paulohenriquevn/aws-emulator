@@ -271,7 +271,7 @@ impl ComAmazonawsEc2Amazonec2State {
                 publish(leaf, (*value).to_string());
             }
         }
-        // theo: the `release_version` leaf of each EKS optimized AMI hierarchy, published
+        // fork: the `release_version` leaf of each EKS optimized AMI hierarchy, published
         // only while the image its `image_id` leaf names is visible.
         for hierarchy in super::eks_optimized_hierarchies() {
             let Some(image) = ids

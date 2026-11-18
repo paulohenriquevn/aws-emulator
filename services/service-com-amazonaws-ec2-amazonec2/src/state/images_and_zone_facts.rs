@@ -2043,7 +2043,7 @@ pub fn published_image_specs() -> Vec<ImageSpec> {
     specs.extend(pcs_sample_image_specs());
     // The images a service publishes a METADATA hierarchy about rather than a bare alias.
     specs.extend(super::published_image_metadata_specs());
-    // theo: the EKS optimized node AMIs managed and self-managed node groups resolve.
+    // fork: the EKS optimized node AMIs managed and self-managed node groups resolve.
     specs.extend(super::published_eks_optimized_specs());
     specs
 }

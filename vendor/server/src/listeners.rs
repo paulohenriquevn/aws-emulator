@@ -84,7 +84,7 @@ fn bind_std(bind_ip: IpAddr, range: PortRange) -> Result<std::net::TcpListener, 
     }
 }
 
-/// theo: the extra loopback addresses a preferred port may land on when another
+/// fork: the extra loopback addresses a preferred port may land on when another
 /// listener holds it on `127.0.0.1`, so two resources configured with the same port
 /// (two RDS instances on 5432) both serve it. Linux routes all of `127.0.0.0/8` to the
 /// loopback interface; where only `127.0.0.1` is configured (macOS by default) these
@@ -92,7 +92,7 @@ fn bind_std(bind_ip: IpAddr, range: PortRange) -> Result<std::net::TcpListener, 
 /// names each of them ([`crate::TlsCertificateAuthority`]).
 pub const EXTRA_LOOPBACK_ADDRESSES: std::ops::RangeInclusive<u8> = 2..=16;
 
-/// theo: bind `port` on `bind_ip`, or, on the default `127.0.0.1` bind, on the first
+/// fork: bind `port` on `bind_ip`, or, on the default `127.0.0.1` bind, on the first
 /// [`EXTRA_LOOPBACK_ADDRESSES`] address where it is free. `None` when none is.
 async fn bind_preferred(bind_ip: IpAddr, port: u16) -> Option<tokio::net::TcpListener> {
     if let Ok(listener) = tokio::net::TcpListener::bind((bind_ip, port)).await {
@@ -260,7 +260,7 @@ impl Listeners {
         serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None, None).await
     }
 
-    /// theo: [`Self::tcp_plaintext`] on `preferred_port` when it is free on the bind
+    /// fork: [`Self::tcp_plaintext`] on `preferred_port` when it is free on the bind
     /// interface, else on a port from the configured range as `tcp_plaintext` picks one.
     ///
     /// For a resource whose API publishes the port it was configured with (an RDS

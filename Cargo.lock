@@ -20777,7 +20777,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ecfad6c3abc80a577f2b91c1e412ee57e7a060d430b553c1b0c940974ebcd49"
 
 [[package]]
-name = "theo-aws-emulator-router"
+name = "aws-emulator-fork-router"
 version = "0.1.0"
 dependencies = [
  "aws-emulator-emulator-telemetry",

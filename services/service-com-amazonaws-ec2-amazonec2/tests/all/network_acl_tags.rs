@@ -62,12 +62,12 @@ async fn both_kinds_of_network_acl_accept_create_and_delete_tags() {
         ok(
             &router,
             "CreateTags",
-            &[p("ResourceId.1", acl_id), p("Tag.1.Key", "Name"), p("Tag.1.Value", "theo-default")],
+            &[p("ResourceId.1", acl_id), p("Tag.1.Key", "Name"), p("Tag.1.Value", "acceptance-default")],
         )
         .await;
         let described = tags_of(&router, acl_id).await;
         assert!(
-            described.contains("<key>Name</key>") && described.contains("<value>theo-default</value>"),
+            described.contains("<key>Name</key>") && described.contains("<value>acceptance-default</value>"),
             "{kind} ACL {acl_id}: the tag must read back through DescribeNetworkAcls, got {described}"
         );
 

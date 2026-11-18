@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! theo: `DeleteReplicationGroup`.
+//! fork: `DeleteReplicationGroup`.
 //!
 //! "By default, this operation deletes the entire replication group, including the
 //! primary/primaries and all of the read replicas" (`DeleteReplicationGroup`). The

@@ -504,7 +504,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ),
             ));
         }
-        // theo: only a `Port` the request names is a port the engine listener must take; with
+        // fork: only a `Port` the request names is a port the engine listener must take; with
         // none, the listener keeps a port from the core's range, as upstream does. Terraform
         // only plans a port change when its configuration names one.
         let requested_port = input.port;
@@ -1346,7 +1346,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         // both are opened: see `open_engine_endpoint`.
                         reader: true,
                         storage: None,
-                        // theo: listen on the configured `Port`, which the API publishes back.
+                        // fork: listen on the configured `Port`, which the API publishes back.
                         preferred_port: requested_port.and_then(|port| u16::try_from(port).ok()),
                     },
                 )

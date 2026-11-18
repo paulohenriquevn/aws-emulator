@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! theo: the port a served DB instance publishes is the `Port` it was created with.
+//! fork: the port a served DB instance publishes is the `Port` it was created with.
 //!
 //! RDS publishes `Endpoint.Port` as the port the instance listens on, which is the `Port`
 //! the request set ("The port number on which the database accepts connections",

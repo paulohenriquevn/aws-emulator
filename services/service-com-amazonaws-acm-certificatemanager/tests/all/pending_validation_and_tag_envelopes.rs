@@ -450,7 +450,7 @@ async fn every_dns_challenge_target_sits_under_its_own_validation_label() {
     for (case, body) in rows {
         let arn = request_certificate(&router, body).await;
         let detail = describe(&router, &arn).await;
-        // theo: a wildcard shares its apex's target ("How CNAME records for ACM work",
+        // fork: a wildcard shares its apex's target ("How CNAME records for ACM work",
         // ACM User Guide), so a target repeats only for the same proven name.
         let mut proven_here: Vec<(String, String)> = Vec::new();
         for validation in validations(case, &detail) {

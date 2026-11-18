@@ -65,7 +65,7 @@ impl ComAmazonawsEc2Amazonec2State {
             mac_modification_tasks => view,
             managed_prefix_lists => view,
             nat_gateways,
-            // theo: network ACLs, the default one included (aws/aws-emulator#76).
+            // fork: network ACLs, the default one included (aws/aws-emulator#76).
             network_acls,
             network_insights_access_scope_analyses => view,
             network_insights_access_scopes,

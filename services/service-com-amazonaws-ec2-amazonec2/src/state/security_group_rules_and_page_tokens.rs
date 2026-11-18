@@ -1977,7 +1977,7 @@ pub fn protocol_is_icmp(protocol: &str) -> bool {
     protocol.eq_ignore_ascii_case(IP_PROTOCOL_ICMP) || protocol.eq_ignore_ascii_case(IP_PROTOCOL_ICMPV6)
 }
 
-/// theo: whether a rule of `protocol` is limited to the port range (or ICMP type and code)
+/// fork: whether a rule of `protocol` is limited to the port range (or ICMP type and code)
 /// it names. Only tcp, udp, icmp and icmpv6 are, by name or by number (6, 17, 1, 58); "-1
 /// or a protocol number other than tcp, udp, icmp, or icmpv6 allows traffic on all ports,
 /// regardless of any port range you specify" (`IpPermission$IpProtocol`).

@@ -270,7 +270,7 @@ async fn request_dns_validated(
         1 + sans.len(),
         "case {case}: expected one validation record per covered name, got {records:?}"
     );
-    // theo: a wildcard name and its apex share one record ("How CNAME records for ACM
+    // fork: a wildcard name and its apex share one record ("How CNAME records for ACM
     // work", ACM User Guide), so the distinct records are what a zone can publish.
     let mut distinct: Vec<Record> = Vec::new();
     for record in records {

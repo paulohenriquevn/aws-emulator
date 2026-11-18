@@ -480,7 +480,7 @@ pub struct EngineEndpointPlan {
     /// The storage to serve: the volume of the DB cluster an endpoint belongs to, where
     /// that storage already exists. `None` starts the resource's own engine.
     pub storage: Option<Arc<sql_engine::InstanceDatabase>>,
-    /// theo: the port the resource was configured with, which the writing listener takes
+    /// fork: the port the resource was configured with, which the writing listener takes
     /// when it is free so the published `Endpoint.Port` is that port. `None` lets the core
     /// pick one, as for an endpoint whose port the API does not publish as configured.
     pub preferred_port: Option<u16>,

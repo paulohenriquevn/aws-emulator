@@ -612,7 +612,7 @@ async fn a_next_token_this_service_did_not_issue_is_refused() {
 /// message — and a name no template carries is refused with the name's own not-found code.
 #[tokio::test]
 async fn an_id_or_a_name_that_names_no_template_is_refused() {
-    // theo: `lt-0000000000000ffff` instead of `lt-00000000000000099`. theo seeds the EKS
+    // fork: `lt-0000000000000ffff` instead of `lt-00000000000000099`. this fork seeds the EKS
     // optimized AMIs, which draw on the same id counter, so the counter reaches 0x99
     // before this test runs and that id stops being one no resource holds.
     let (router, engine) = crate::ec2_query::emulator();

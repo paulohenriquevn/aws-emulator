@@ -14,7 +14,7 @@ use serde_json::json;
 
 use crate::certificate_lifecycle::{describe, request_certificate, router};
 
-const APEX: &str = "wildcard-probe-theo.com";
+const APEX: &str = "wildcard-probe.example.com";
 
 fn resource_record_of(options: &serde_json::Value, domain: &str) -> serde_json::Value {
     options
