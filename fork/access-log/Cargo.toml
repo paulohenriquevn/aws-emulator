@@ -1,0 +1,17 @@
+[package]
+name = "aws-emulator-fork-access-log"
+description = "Logs one line per request the emulator answers, so a client's calls can be followed."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bytes = { workspace = true }
+emulator-server = { workspace = true }
+http = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

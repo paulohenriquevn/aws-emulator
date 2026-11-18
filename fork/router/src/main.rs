@@ -185,7 +185,7 @@ async fn build_and_serve(options: RunOptions) {
 
     let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
 
-    let router = aws_emulator_fork_router::build_router(engine);
+    let router = aws_emulator_fork_access_log::AccessLog::new(aws_emulator_fork_router::build_router(engine));
 
     let outcome = emulator_server::serve_emulator_until_shutdown(router).await;
     // Only a clean end may send the final batch: a session without one is how an

@@ -65,6 +65,7 @@ path = "src/main.rs"
 [dependencies]
 aws-emulator-fork-console = {{ workspace = true }}
 aws-emulator-fork-service-account-issuers = {{ workspace = true }}
+aws-emulator-fork-access-log = {{ workspace = true }}
 engine = {{ workspace = true }}
 emulator-server = {{ workspace = true }}
 emulator-telemetry = {{ workspace = true }}
@@ -139,10 +140,13 @@ def render_lib(services: list[str]) -> str:
 
 def render_main() -> str:
     upstream = UPSTREAM_MAIN.read_text()
-    needle = "aws_emulator_router::build_router"
+    needle = "aws_emulator_router::build_router(engine)"
     if upstream.count(needle) != 1:
         raise RenderError(f"core/router/src/main.rs must call {needle} exactly once; found {upstream.count(needle)}")
-    return HEADER + upstream.replace(needle, "aws_emulator_fork_router::build_router")
+    # Every request is answered through the access log (fork/access-log).
+    return HEADER + upstream.replace(
+        needle, "aws_emulator_fork_access_log::AccessLog::new(aws_emulator_fork_router::build_router(engine))"
+    )
 
 
 def rendered() -> dict[Path, str]:

@@ -93,7 +93,8 @@ EMU_HOME=$WORK/home
 mkdir -p "$EMU_HOME"
 # Bound to the gateway, and named in the certificate by EMULATOR_BIND_ADDRESS, so a pod
 # verifies https://<gateway>:<port> with the emulator's CA.
-EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
+# The access log (fork/access-log) records every call the controllers make.
+RUST_LOG=${EMULATOR_LOG:-info,access=debug} EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
 EMU_PID=$!
 EMU_DIR=$EMU_HOME/.aws/emulator/$PORT
 CA=$EMU_DIR/ca.pem

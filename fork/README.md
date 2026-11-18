@@ -14,6 +14,7 @@ account. Everything the fork adds lives in this directory, plus a few patches in
 | `console/` | The read-only web console the binary serves at `/_console/`: a React app in `console/web` and the crate that embeds its build. |
 | `acceptance/` | Eight Terraform fixtures (billing, compute, data, edge, network, operations, registry, security) and `run.sh`, which runs each one against a fresh emulator. |
 | `service-account-issuers/` | The route that registers a Kubernetes cluster's service account key set for an EKS cluster of the emulator. |
+| `access-log/` | Logs one line per request the binary answers (`RUST_LOG=info,access=debug`): the operation, its status and error code, and how long it took. |
 | `kubernetes/` | `run.sh`, which runs real in-cluster controllers and workload identity in a kind cluster against the emulator, with the manifests and chart values it applies. |
 
 ## Usage
@@ -120,6 +121,7 @@ upstream ships the fix.
 | RDS (and core listeners) | An instance created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves it, so `Endpoint.Port` matches it | aws/aws-emulator#537 |
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |
+| STS | `GetCallerIdentity` reports EKS Pod Identity credentials as the associated role's session (`assumed-role/<role>/eks-...`) | not reported yet |
 | EKS Auth | `AssumeRoleForPodIdentity` serves an EKS cluster of the emulator whose tokens a registered external Kubernetes cluster signs | not reported yet |
 | Price List | EC2 instance products carry the `marketoption` attribute (`OnDemand`) | not reported yet |
 | EC2 | Each state an instance moves into is published on EventBridge as an `EC2 Instance State-change Notification`, including the states the clock moves it into | not reported yet |

@@ -393,6 +393,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-emulator-fork-access-log"
+version = "0.1.0"
+dependencies = [
+ "aws-emulator-server",
+ "bytes",
+ "http",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "aws-emulator-fork-console"
 version = "0.1.0"
 dependencies = [
@@ -406,6 +417,7 @@ version = "0.1.0"
 dependencies = [
  "aws-emulator-emulator-telemetry",
  "aws-emulator-engine",
+ "aws-emulator-fork-access-log",
  "aws-emulator-fork-console",
  "aws-emulator-fork-service-account-issuers",
  "aws-emulator-server",
