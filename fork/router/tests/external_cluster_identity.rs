@@ -13,7 +13,7 @@ use aws_emulator_fork_router::{build_router, InMemoryEngine};
 use bytes::Bytes;
 use emulator_server::EmulatorService;
 use ring::rand::SystemRandom;
-use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+use ring::signature::{RsaKeyPair, RsaPublicKeyComponents, RSA_PKCS1_SHA256};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,40 +44,52 @@ fn on_router_thread(case: impl FnOnce(Router) -> std::pin::Pin<Box<dyn std::futu
         .expect("the case passes");
 }
 
-/// The key a local cluster's API server signs service account tokens with.
+/// The key a local cluster's API server signs service account tokens with: RS256 over a
+/// 2048-bit RSA key, as kind's and EKS's API servers sign them. The keys are test fixtures
+/// (`tests/fixtures/*.pk8`, PKCS #8 DER) and sign nothing outside these tests.
 struct ClusterKey {
-    pair: EcdsaKeyPair,
+    pair: RsaKeyPair,
 }
 
 impl ClusterKey {
-    fn new() -> Self {
-        let rng = SystemRandom::new();
-        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).expect("a key");
-        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).expect("a key pair");
-        Self { pair }
+    /// The key the local cluster signs with.
+    fn cluster() -> Self {
+        Self::from_pkcs8(include_bytes!("fixtures/cluster-signing-key.pk8"))
+    }
+
+    /// A key the local cluster does not publish.
+    fn impostor() -> Self {
+        Self::from_pkcs8(include_bytes!("fixtures/impostor-signing-key.pk8"))
+    }
+
+    fn from_pkcs8(document: &[u8]) -> Self {
+        Self { pair: RsaKeyPair::from_pkcs8(document).expect("a PKCS #8 RSA key") }
     }
 
     /// What `kubectl get --raw /openid/v1/jwks` answers.
     fn key_set(&self) -> Value {
-        let point = self.pair.public_key().as_ref();
+        let public: RsaPublicKeyComponents<Vec<u8>> = self.pair.public().into();
         json!({"keys": [{
-            "use": "sig", "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": "cluster-key",
-            "x": base64url(&point[1..33]), "y": base64url(&point[33..65]),
+            "use": "sig", "kty": "RSA", "alg": "RS256", "kid": "cluster-key",
+            "n": base64url(&public.n), "e": base64url(&public.e),
         }]})
     }
 
     /// A projected service account token for `service_account` in [`NAMESPACE`].
     fn token(&self, issuer: &str, audience: &str, service_account: &str) -> String {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("after the epoch").as_secs();
-        let header = json!({"alg": "ES256", "kid": "cluster-key"});
+        let header = json!({"alg": "RS256", "kid": "cluster-key"});
         let claims = json!({
             "iss": issuer, "aud": [audience], "iat": now, "nbf": now, "exp": now + 3600,
             "sub": format!("system:serviceaccount:{NAMESPACE}:{service_account}"),
             "kubernetes.io": {"namespace": NAMESPACE, "pod": {"name": format!("{service_account}-0"), "uid": "1"}, "serviceaccount": {"name": service_account, "uid": "2"}},
         });
         let signing_input = format!("{}.{}", base64url(header.to_string().as_bytes()), base64url(claims.to_string().as_bytes()));
-        let signature = self.pair.sign(&SystemRandom::new(), signing_input.as_bytes()).expect("a signature");
-        format!("{signing_input}.{}", base64url(signature.as_ref()))
+        let mut signature = vec![0; self.pair.public().modulus_len()];
+        self.pair
+            .sign(&RSA_PKCS1_SHA256, &SystemRandom::new(), signing_input.as_bytes(), &mut signature)
+            .expect("a signature");
+        format!("{signing_input}.{}", base64url(&signature))
     }
 }
 
@@ -223,7 +235,7 @@ async fn assume_for_pod_identity(router: &Router, token: &str) -> (u16, Value) {
 fn an_irsa_token_the_local_cluster_signed_assumes_the_role() {
     on_router_thread(|router| {
         Box::pin(async move {
-            let key = ClusterKey::new();
+            let key = ClusterKey::cluster();
             let world = world(&router, &key).await;
 
             let (status, body) = assume_with_web_identity(&router, &world.irsa_role, &key.token(&world.issuer, STS_AUDIENCE, IRSA_ACCOUNT)).await;
@@ -238,10 +250,10 @@ fn an_irsa_token_the_local_cluster_signed_assumes_the_role() {
 fn an_irsa_token_signed_by_another_key_is_refused() {
     on_router_thread(|router| {
         Box::pin(async move {
-            let key = ClusterKey::new();
+            let key = ClusterKey::cluster();
             let world = world(&router, &key).await;
 
-            let forged = ClusterKey::new().token(&world.issuer, STS_AUDIENCE, IRSA_ACCOUNT);
+            let forged = ClusterKey::impostor().token(&world.issuer, STS_AUDIENCE, IRSA_ACCOUNT);
             let (status, body) = assume_with_web_identity(&router, &world.irsa_role, &forged).await;
 
             assert_eq!(status, 400, "{body}");
@@ -254,7 +266,7 @@ fn an_irsa_token_signed_by_another_key_is_refused() {
 fn a_pod_identity_token_the_local_cluster_signed_gets_the_associated_role() {
     on_router_thread(|router| {
         Box::pin(async move {
-            let key = ClusterKey::new();
+            let key = ClusterKey::cluster();
             let world = world(&router, &key).await;
 
             let (status, body) = assume_for_pod_identity(&router, &key.token(&world.issuer, PODS_AUDIENCE, POD_IDENTITY_ACCOUNT)).await;
@@ -271,10 +283,10 @@ fn a_pod_identity_token_the_local_cluster_signed_gets_the_associated_role() {
 fn a_pod_identity_token_signed_by_another_key_is_refused() {
     on_router_thread(|router| {
         Box::pin(async move {
-            let key = ClusterKey::new();
+            let key = ClusterKey::cluster();
             let world = world(&router, &key).await;
 
-            let forged = ClusterKey::new().token(&world.issuer, PODS_AUDIENCE, POD_IDENTITY_ACCOUNT);
+            let forged = ClusterKey::impostor().token(&world.issuer, PODS_AUDIENCE, POD_IDENTITY_ACCOUNT);
             let (status, body) = assume_for_pod_identity(&router, &forged).await;
 
             assert_eq!(status, 400, "{body}");
@@ -286,7 +298,7 @@ fn a_pod_identity_token_signed_by_another_key_is_refused() {
 fn a_pod_identity_token_for_a_service_account_with_no_association_is_denied() {
     on_router_thread(|router| {
         Box::pin(async move {
-            let key = ClusterKey::new();
+            let key = ClusterKey::cluster();
             let world = world(&router, &key).await;
 
             let (status, body) = assume_for_pod_identity(&router, &key.token(&world.issuer, PODS_AUDIENCE, "unassociated")).await;
@@ -300,7 +312,7 @@ fn a_pod_identity_token_for_a_service_account_with_no_association_is_denied() {
 fn a_key_set_for_a_cluster_the_emulator_does_not_hold_is_not_registered() {
     on_router_thread(|router| {
         Box::pin(async move {
-            let key = ClusterKey::new();
+            let key = ClusterKey::cluster();
 
             let (status, body) = rest(&router, "eks", &format!("eks.{REGION}.amazonaws.com"), "PUT", "/_fork/eks/clusters/absent/service-account-issuer-keys", &key.key_set()).await;
 
