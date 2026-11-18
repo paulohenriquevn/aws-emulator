@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Run every Terraform fixture under fork/acceptance against a fresh emulator.
 #
-# A fixture passes only when all four steps succeed:
+# A fixture passes only when every step succeeds:
 #   1. apply      the resources are created
-#   2. plan       a second plan shows NO changes (-detailed-exitcode 0); a diff means
+#   2. check      the fixture's own check.sh, when it has one, exercises what Terraform
+#                 cannot (an invalidation, an event delivered to a queue). It runs in
+#                 the fixture directory with the emulator's AWS_* environment, after
+#                 apply, and reads the outputs with `terraform output`
+#   3. plan       a second plan shows NO changes (-detailed-exitcode 0); a diff means
 #                 the emulator read back something different from what it accepted
-#   3. destroy    every resource is deleted
-#   4. empty      nothing the fixture created is left behind (checked by the destroy
+#   4. destroy    every resource is deleted
+#   5. empty      nothing the fixture created is left behind (checked by the destroy
 #                 plan's own state, which must be empty)
 #
 # Usage: fork/acceptance/run.sh <emulator-binary | docker:IMAGE> [fixture ...]
@@ -101,16 +105,16 @@ stop_emulator() {
 trap stop_emulator EXIT
 
 failed=0
-printf '%-10s %-8s %-8s %-8s %s\n' FIXTURE APPLY REPLAN DESTROY LOG
+printf '%-10s %-8s %-8s %-8s %-8s %s\n' FIXTURE APPLY CHECK REPLAN DESTROY LOG
 for fx in "${FIXTURES[@]}"; do
   dir=$WORK/$fx
   rm -rf "$dir"; mkdir -p "$dir"
   cp -rL "$HERE/$fx/." "$dir/src"
   log=$dir/terraform.log
-  apply=- replan=- destroy=-
+  apply=- check=- replan=- destroy=-
   if ! start_emulator "$dir/home"; then
     failed=1
-    printf '%-10s %-8s %-8s %-8s %s\n' "$fx" START-FAIL - - "$dir/home/emulator.log"
+    printf '%-10s %-8s %-8s %-8s %-8s %s\n' "$fx" START-FAIL - - - "$dir/home/emulator.log"
     continue
   fi
   (
@@ -120,6 +124,9 @@ for fx in "${FIXTURES[@]}"; do
   if [[ $apply == - ]]; then
     if (cd "$dir/src" && terraform apply -auto-approve -input=false -no-color >>"$log" 2>&1); then
       apply=ok
+      if [[ -f $dir/src/check.sh ]]; then
+        if (cd "$dir/src" && bash ./check.sh >>"$log" 2>&1); then check=ok; else check=FAIL; fi
+      fi
       set +e
       (cd "$dir/src" && terraform plan -detailed-exitcode -input=false -no-color >>"$log" 2>&1)
       rc=$?
@@ -136,7 +143,7 @@ for fx in "${FIXTURES[@]}"; do
     fi
   fi
   stop_emulator
-  [[ $apply == ok && $replan == ok && $destroy == ok ]] || failed=1
-  printf '%-10s %-8s %-8s %-8s %s\n' "$fx" "$apply" "$replan" "$destroy" "$log"
+  [[ $apply == ok && $check != FAIL && $replan == ok && $destroy == ok ]] || failed=1
+  printf '%-10s %-8s %-8s %-8s %-8s %s\n' "$fx" "$apply" "$check" "$replan" "$destroy" "$log"
 done
 exit $failed

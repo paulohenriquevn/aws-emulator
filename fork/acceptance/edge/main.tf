@@ -97,6 +97,36 @@ module "dashboard_bucket" {
   force_destroy = true
 }
 
+# The security headers the dashboard's nginx sets, which the SaaS edge must reproduce
+# once the dashboard is served from S3 (no nginx in the path).
+resource "aws_cloudfront_response_headers_policy" "dashboard" {
+  name = "acceptance-dashboard-security"
+
+  security_headers_config {
+    content_security_policy {
+      content_security_policy = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+      override                = true
+    }
+    strict_transport_security {
+      access_control_max_age_sec = 31536000
+      include_subdomains         = true
+      preload                    = true
+      override                   = true
+    }
+    content_type_options {
+      override = true
+    }
+    frame_options {
+      frame_option = "DENY"
+      override     = true
+    }
+    referrer_policy {
+      referrer_policy = "strict-origin-when-cross-origin"
+      override        = true
+    }
+  }
+}
+
 module "cdn" {
   source  = "terraform-aws-modules/cloudfront/aws"
   version = "6.7.1"
@@ -120,9 +150,10 @@ module "cdn" {
     }
   }
   default_cache_behavior = {
-    target_origin_id       = "dashboard"
-    viewer_protocol_policy = "redirect-to-https"
-    cache_policy_name      = "Managed-CachingOptimized"
+    target_origin_id           = "dashboard"
+    viewer_protocol_policy     = "redirect-to-https"
+    cache_policy_name          = "Managed-CachingOptimized"
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.dashboard.id
   }
   viewer_certificate = {
     acm_certificate_arn = module.acm.acm_certificate_arn
@@ -132,3 +163,5 @@ module "cdn" {
 
 output "alb_dns_name" { value = module.alb.dns_name }
 output "cdn_domain_name" { value = module.cdn.cloudfront_distribution_domain_name }
+output "cdn_id" { value = module.cdn.cloudfront_distribution_id }
+output "headers_policy_id" { value = aws_cloudfront_response_headers_policy.dashboard.id }
