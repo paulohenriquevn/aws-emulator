@@ -221,6 +221,24 @@ say "webhook and EKS Pod Identity Agent running"
 
 # --- 5. The checks ------------------------------------------------------------------------
 
+# What a failed check leaves for diagnosis, in $WORK/diagnostics/<check>/: the cluster's
+# pods and events, and the full logs of every pod in the namespaces given.
+diagnose() {
+  local check=$1; shift
+  local dir=$WORK/diagnostics/$check
+  mkdir -p "$dir"
+  kubectl get pods -A -o wide >"$dir/pods.txt" 2>&1 || true
+  kubectl get events -A --sort-by=.lastTimestamp >"$dir/events.txt" 2>&1 || true
+  local namespace pod
+  for namespace in "$@"; do
+    for pod in $(kubectl -n "$namespace" get pods -o name 2>/dev/null); do
+      kubectl -n "$namespace" describe "$pod" >"$dir/$namespace-${pod#pod/}.describe.txt" 2>&1 || true
+      kubectl -n "$namespace" logs "$pod" --all-containers --prefix --tail=-1 >"$dir/$namespace-${pod#pod/}.log" 2>&1 || true
+    done
+  done
+  say "$check: diagnostics in $dir"
+}
+
 # Run the AWS CLI in a pod as service account $1 and print what it answers.
 probe() {
   local account=$1; shift
@@ -237,7 +255,7 @@ check_irsa() {
   local answer
   answer=$(probe irsa-probe sts get-caller-identity --query Arn --output text)
   say "irsa: $answer"
-  [[ $answer == "arn:aws:sts::$ACCOUNT:assumed-role/irsa-probe/"* ]]
+  [[ $answer == "arn:aws:sts::$ACCOUNT:assumed-role/irsa-probe/"* ]] || { diagnose irsa probes kube-system; return 1; }
 }
 
 check_pod_identity() {
@@ -245,7 +263,7 @@ check_pod_identity() {
   local answer
   answer=$(probe pod-identity-probe sts get-caller-identity --query Arn --output text)
   say "pod-identity: $answer"
-  [[ $answer == "arn:aws:sts::$ACCOUNT:assumed-role/pod-identity-probe/"* ]]
+  [[ $answer == "arn:aws:sts::$ACCOUNT:assumed-role/pod-identity-probe/"* ]] || { diagnose pod-identity probes kube-system; return 1; }
 }
 
 check_load_balancer() {
@@ -253,7 +271,7 @@ check_load_balancer() {
     --set clusterName="$CLUSTER" --set region="$REGION" --set vpcId="$VPC" \
     --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
     --set "env.AWS_ENDPOINT_URL=$AWS_ENDPOINT_URL" \
-    -f "$HERE/values/aws-load-balancer-controller.yaml" --wait --timeout 300s >>"$LOG" 2>&1 || { say "load-balancer: the controller did not start"; return 1; }
+    -f "$HERE/values/aws-load-balancer-controller.yaml" --wait --timeout 300s >>"$LOG" 2>&1 || { say "load-balancer: the controller did not start"; diagnose load-balancer kube-system probes; return 1; }
   kubectl apply -f "$HERE/manifests/ingress-probe.yaml" >>"$LOG"
   local hostname=
   for _ in $(seq 180); do
@@ -262,10 +280,10 @@ check_load_balancer() {
     sleep 1
   done
   say "load-balancer: ingress hostname ${hostname:-<none>}"
-  [[ -n $hostname ]] || { kubectl -n kube-system logs deployment/aws-load-balancer-controller --tail=40 >>"$LOG" 2>&1; return 1; }
+  [[ -n $hostname ]] || { diagnose load-balancer kube-system probes; return 1; }
   local balancer group pod_ip targets
   balancer=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?DNSName=='$hostname'].LoadBalancerArn | [0]" --output text)
-  [[ $balancer == arn:* ]] || { say "load-balancer: no ALB in the emulator has DNS name $hostname"; return 1; }
+  [[ $balancer == arn:* ]] || { say "load-balancer: no ALB in the emulator has DNS name $hostname"; diagnose load-balancer kube-system probes; return 1; }
   group=$(aws elbv2 describe-target-groups --load-balancer-arn "$balancer" --query 'TargetGroups[0].TargetGroupArn' --output text)
   pod_ip=$(kubectl -n probes get pod -l app=echo -o jsonpath='{.items[0].status.podIP}')
   for _ in $(seq 60); do
@@ -274,7 +292,7 @@ check_load_balancer() {
     sleep 1
   done
   say "load-balancer: $balancer targets [$targets], pod $pod_ip"
-  [[ " $targets " == *" $pod_ip "* ]]
+  [[ " $targets " == *" $pod_ip "* ]] || { diagnose load-balancer kube-system probes; return 1; }
 }
 
 check_external_secrets() {
@@ -282,7 +300,7 @@ check_external_secrets() {
   aws secretsmanager create-secret --name probes/external-secret --secret-string "$value" >>"$LOG"
   helm upgrade --install external-secrets external-secrets/external-secrets --version "$ESO_CHART_VERSION" -n external-secrets \
     --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ESO_ROLE" \
-    -f <(sed "s|@ENDPOINT@|$AWS_ENDPOINT_URL|g" "$HERE/values/external-secrets.yaml") --wait --timeout 300s >>"$LOG" 2>&1 || { say "external-secrets: the operator did not start"; return 1; }
+    -f <(sed "s|@ENDPOINT@|$AWS_ENDPOINT_URL|g" "$HERE/values/external-secrets.yaml") --wait --timeout 300s >>"$LOG" 2>&1 || { say "external-secrets: the operator did not start"; diagnose external-secrets external-secrets kube-system; return 1; }
   sed -e "s|@REGION@|$REGION|g" "$HERE/manifests/external-secret.yaml" | kubectl apply -f - >>"$LOG" 2>&1 \
     || { sleep 20; sed -e "s|@REGION@|$REGION|g" "$HERE/manifests/external-secret.yaml" | kubectl apply -f - >>"$LOG"; }
   local copied=
@@ -292,7 +310,7 @@ check_external_secrets() {
     sleep 1
   done
   say "external-secrets: secret holds '${copied:-<nothing>}', Secrets Manager holds '$value'"
-  [[ $copied == "$value" ]] || { kubectl -n probes describe externalsecret external-secret >>"$LOG" 2>&1; return 1; }
+  [[ $copied == "$value" ]] || { kubectl -n probes describe externalsecret external-secret >>"$LOG" 2>&1; diagnose external-secrets external-secrets kube-system; return 1; }
 }
 
 check_opencost() {
@@ -307,22 +325,29 @@ check_opencost() {
   kubectl apply -f "$HERE/manifests/price-list-server.yaml" >>"$LOG"
   kubectl -n opencost rollout status deployment/price-list --timeout=120s >>"$LOG" 2>&1
   helm upgrade --install opencost opencost/opencost --version "$OPENCOST_CHART_VERSION" -n opencost \
-    -f "$HERE/values/opencost.yaml" --wait --timeout 300s >>"$LOG" 2>&1 || { say "opencost: did not start"; return 1; }
+    -f "$HERE/values/opencost.yaml" --wait --timeout 300s >>"$LOG" 2>&1 || { say "opencost: did not start"; diagnose opencost opencost; return 1; }
   local expected
   expected=$(aws pricing get-products --region us-east-1 --service-code AmazonEC2 --filters \
     Type=TERM_MATCH,Field=instanceType,Value="$NODE_INSTANCE_TYPE" Type=TERM_MATCH,Field=regionCode,Value="$REGION" \
     Type=TERM_MATCH,Field=operatingSystem,Value=Linux Type=TERM_MATCH,Field=tenancy,Value=Shared \
     Type=TERM_MATCH,Field=preInstalledSw,Value=NA Type=TERM_MATCH,Field=capacitystatus,Value=Used \
     --query 'PriceList[0]' --output text | jq -r '.terms.OnDemand[].priceDimensions[].pricePerUnit.USD')
+  # OpenCost reports default CPU and memory prices until it has read the price list, so
+  # wait for the reported cost to become the emulator's price.
   local reported=
-  for _ in $(seq 120); do
+  for _ in $(seq 60); do
     reported=$(kubectl get --raw /api/v1/namespaces/opencost/services/opencost:9003/proxy/metrics 2>/dev/null \
       | awk '/^node_total_hourly_cost\{/ {print $NF; exit}' || true)
-    [[ -n $reported ]] && break
-    sleep 2
+    same_price "$reported" "$expected" && break
+    sleep 5
   done
   say "opencost: node_total_hourly_cost ${reported:-<none>}, emulator price for $NODE_INSTANCE_TYPE $expected"
-  [[ -n $reported && -n $expected ]] && awk -v a="$reported" -v b="$expected" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d < 0.0001) }'
+  same_price "$reported" "$expected" || { diagnose opencost opencost; return 1; }
+}
+
+# Whether two hourly prices agree to a hundredth of a cent.
+same_price() {
+  [[ -n $1 && -n $2 ]] && awk -v a="$1" -v b="$2" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d < 0.0001) }'
 }
 
 failed=0
