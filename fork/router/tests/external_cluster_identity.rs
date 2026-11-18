@@ -298,7 +298,7 @@ fn a_pod_identity_token_signed_by_another_key_is_refused() {
             let forged = ClusterKey::impostor().token(&world.issuer, PODS_AUDIENCE, POD_IDENTITY_ACCOUNT);
             let (status, body) = assume_for_pod_identity(&router, &forged).await;
 
-            assert_eq!(status, 400, "{body}");
+            assert_eq!((status, body["__type"].as_str()), (400, Some("InvalidTokenException")), "{body}");
         })
     });
 }
@@ -312,7 +312,8 @@ fn a_pod_identity_token_for_a_service_account_with_no_association_is_denied() {
 
             let (status, body) = assume_for_pod_identity(&router, &key.token(&world.issuer, PODS_AUDIENCE, "unassociated")).await;
 
-            assert_eq!(status, 403, "{body}");
+            // The EKS Auth model gives AccessDeniedException HTTP status 400.
+            assert_eq!((status, body["__type"].as_str()), (400, Some("AccessDeniedException")), "{body}");
         })
     });
 }
