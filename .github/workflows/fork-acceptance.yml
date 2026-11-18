@@ -112,6 +112,7 @@ jobs:
           db_instance_configured_port
           replication_group_deletion
           default_rule_tags
+          unsigned_query_calls
 
       - name: The TLS test fails without the account-prefixed localhost name
         run: |

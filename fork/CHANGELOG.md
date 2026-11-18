@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - EC2 publishes an `EC2 Instance State-change Notification` on the default EventBridge bus for every state an instance moves into, without waiting for another EC2 call (#2)
 - `PUT /_fork/eks/clusters/{name}/service-account-issuer-keys` registers a Kubernetes cluster's service account key set for an EKS cluster's OIDC issuer; STS `AssumeRoleWithWebIdentity` and EKS Auth `AssumeRoleForPodIdentity` then accept that cluster's tokens (#2)
 - The router mounts EKS Auth (#2)
+- `EMULATOR_ELB_LISTENER_SOCKETS=off` makes Application Load Balancers publish an `elb.amazonaws.com` DNS name, which a Kubernetes Ingress status accepts, instead of a socket's `host:port` (#2)
 - With `RUST_LOG=info,access=debug` the binary logs each request it answers: operation, status, error code and duration (#2)
 - `fork/kubernetes/run.sh` runs IRSA, EKS Pod Identity, the AWS Load Balancer Controller, External Secrets and OpenCost in a kind cluster against the emulator (#2)
 
@@ -27,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - The fork's layer lives in `fork/`, its router crate is `aws-emulator-fork-router`, its binary is `aws-emulator-fork`, and `run.sh` reads `ACCEPTANCE_WORK` and `ACCEPTANCE_PORT`; the names no longer carry the downstream project's name (#2)
 
 ### Fixed
+- An unsigned query-protocol call to the emulator's endpoint, such as STS `AssumeRoleWithWebIdentity`, no longer answers `500 AmbiguousService` while one Application Load Balancer has a rule for `/` (#2)
 - Elastic Load Balancing v2 `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule instead of answering `RuleNotFound`, so the AWS Load Balancer Controller can reconcile an Ingress (#2)
 - STS `GetCallerIdentity` reports credentials from EKS Auth `AssumeRoleForPodIdentity` as the associated role's session, not as the emulator's own user (#2)
 - The Price List API's EC2 instance products carry `marketoption` `OnDemand`, without which OpenCost prices no node from the price list (#2)

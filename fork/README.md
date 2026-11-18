@@ -90,7 +90,7 @@ authentication on, the route takes only requests signed with the emulator's own 
 |---|---|
 | `irsa` | A pod whose service account is annotated with a role is that role (`sts get-caller-identity`). |
 | `pod-identity` | A pod whose service account has a pod identity association gets the role's credentials from the EKS Pod Identity Agent. |
-| `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with the pod's IP registered as a target. |
+| `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with the kind node's instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target). |
 | `external-secrets` | External Secrets, on IRSA, copies a Secrets Manager secret into a Kubernetes Secret. |
 | `opencost` | OpenCost reports the node's hourly cost as the emulator's on-demand price for its instance type. |
 
@@ -101,6 +101,13 @@ before `resolveBaseEndpoint`), and the client then reads only the STS-specific v
 without it the token goes to `sts.<region>.amazonaws.com`. A component that builds its own HTTP
 client also ignores `AWS_CA_BUNDLE` (the EKS Pod Identity Agent does); `SSL_CERT_FILE` pointing at
 the emulator's CA covers both cases.
+
+The harness runs the emulator with `EMULATOR_ELB_LISTENER_SOCKETS=off`. By default an
+Application Load Balancer gets a socket of its own and publishes its `host:port` as `DNSName`,
+which the Kubernetes API refuses as the hostname of an Ingress status, so the controller could
+never report the load balancer. Without sockets the load balancer publishes
+`<name>-<id>.<region>.elb.amazonaws.com` and is served at the emulator's endpoint for a request
+whose `Host` is that name.
 
 It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git, and network
 access for images and charts. The emulator listens on the gateway of kind's Docker network
@@ -130,6 +137,8 @@ upstream ships the fix.
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |
 | Elastic Load Balancing v2 | `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule, which `DescribeRules` reports | not reported yet |
+| Elastic Load Balancing v2 | `EMULATOR_ELB_LISTENER_SOCKETS=off` makes an Application Load Balancer publish an `elb.amazonaws.com` name instead of a socket's `host:port` | not reported yet |
+| Elastic Load Balancing v2 | An unsigned form `POST /` on the emulator's endpoint (STS `AssumeRoleWithWebIdentity`) is not claimed as load balancer traffic, so it no longer answers `500 AmbiguousService` beside an ALB with a rule for `/` | not reported yet |
 | STS | `GetCallerIdentity` reports EKS Pod Identity credentials as the associated role's session (`assumed-role/<role>/eks-...`) | not reported yet |
 | EKS Auth | `AssumeRoleForPodIdentity` serves an EKS cluster of the emulator whose tokens a registered external Kubernetes cluster signs | not reported yet |
 | Price List | EC2 instance products carry the `marketoption` attribute (`OnDemand`) | not reported yet |

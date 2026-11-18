@@ -6,9 +6,11 @@
 //! Secrets) logs little about the AWS calls it makes, and the emulator logs none, so a call
 //! that is refused, unimplemented or slow leaves no trace. [`AccessLog`] wraps the router
 //! and records, at `debug` on the `access` target, what each request was and how it was
-//! answered: method, host, path, the SigV4 scope's service and Region, the operation (the
-//! `X-Amz-Target` header, or the query protocol's `Action`), the status, the error code of
-//! an error answer, and how long it took.
+//! answered: method, host, path, content type, the SigV4 scope's service and Region, the
+//! operation (the `X-Amz-Target` header, or the query protocol's `Action`), the status,
+//! the error code of an error answer, and how long it took. When the ROUTER itself refused
+//! the request (`UnknownService`, `AmbiguousService`), its message is logged too: it names
+//! only the routing key and the services that claimed the request.
 //!
 //! Nothing that authenticates a caller or that a caller stored is logged: no header but
 //! `Host` and `X-Amz-Target`, no query string (a presigned URL carries its signature there),
@@ -43,22 +45,26 @@ impl<S: EmulatorService> EmulatorService for AccessLog<S> {
         let started = Instant::now();
         let method = request.method().to_string();
         let host = header(&request, "host");
+        let content_type = header(&request, "content-type");
         let path = bounded(request.uri().path());
         let scope = emulator_server::sigv4_credential_scope(request.headers());
         let operation = operation(&request);
         let response = self.inner.handle_request(request).await;
         let status = response.status().as_u16();
         let error = if status >= 400 { error_code(response.body()) } else { String::new() };
+        let routing_refusal = routing_refusal_message(&error, response.body());
         tracing::debug!(
             target: "access",
             method = %method,
             host = %host,
             path = %path,
+            content_type = %content_type,
             service = %scope.as_ref().map(|scope| scope.service.as_str()).unwrap_or(""),
             region = %scope.as_ref().map(|scope| scope.region.as_str()).unwrap_or(""),
             operation = %operation,
             status,
             error = %error,
+            routing_refusal = %routing_refusal,
             elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "request"
         );
@@ -126,8 +132,24 @@ pub fn error_code(body: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+/// The router's own message when it refused to route the request, else nothing. Only
+/// these two codes are the router's, and their message carries no request content.
+pub fn routing_refusal_message(error: &str, body: &[u8]) -> String {
+    if error != "UnknownService" && error != "AmbiguousService" {
+        return String::new();
+    }
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message").and_then(serde_json::Value::as_str).map(|m| bounded_to(m, 512)))
+        .unwrap_or_default()
+}
+
 fn bounded(value: &str) -> String {
-    let mut end = value.len().min(MAX_FIELD_BYTES);
+    bounded_to(value, MAX_FIELD_BYTES)
+}
+
+fn bounded_to(value: &str, max: usize) -> String {
+    let mut end = value.len().min(max);
     while !value.is_char_boundary(end) {
         end -= 1;
     }
@@ -166,6 +188,18 @@ mod tests {
     #[test]
     fn an_error_body_with_no_code_logs_none() {
         assert_eq!(error_code(b"not found"), "");
+    }
+
+    #[test]
+    fn a_routing_refusal_logs_the_routers_message() {
+        let body = br#"{"__type":"AmbiguousService","message":"2 emulated services all claim requests for '<unresolved>': sts, iam; the request is rejected"}"#;
+        assert!(routing_refusal_message("AmbiguousService", body).starts_with("2 emulated services all claim"));
+    }
+
+    #[test]
+    fn a_service_error_logs_no_message() {
+        let body = br#"{"__type":"ValidationException","message":"value 'secret' is too long"}"#;
+        assert_eq!(routing_refusal_message("ValidationException", body), "");
     }
 
     #[test]

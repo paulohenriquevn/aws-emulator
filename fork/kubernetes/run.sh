@@ -14,7 +14,7 @@
 #        irsa                  an annotated pod is the IRSA role (sts get-caller-identity)
 #        pod-identity          an associated pod gets the role's credentials from the agent
 #        load-balancer         the AWS Load Balancer Controller (IRSA) turns an Ingress into
-#                              an ALB in the emulator, with the pod registered as a target
+#                              an ALB in the emulator, with the node registered as a target
 #        external-secrets      External Secrets (IRSA) copies a Secrets Manager secret into
 #                              a Kubernetes Secret
 #        opencost              OpenCost prices the node from the emulator's EC2 price list
@@ -93,8 +93,10 @@ EMU_HOME=$WORK/home
 mkdir -p "$EMU_HOME"
 # Bound to the gateway, and named in the certificate by EMULATOR_BIND_ADDRESS, so a pod
 # verifies https://<gateway>:<port> with the emulator's CA.
-# The access log (fork/access-log) records every call the controllers make.
-RUST_LOG=${EMULATOR_LOG:-info,access=debug} EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
+# The access log (fork/access-log) records every call the controllers make. Without
+# listener sockets an ALB publishes an elb.amazonaws.com name, which an Ingress status
+# accepts as a hostname; a socket's host:port is refused there.
+RUST_LOG=${EMULATOR_LOG:-info,access=debug} EMULATOR_ELB_LISTENER_SOCKETS=off EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
 EMU_PID=$!
 EMU_DIR=$EMU_HOME/.aws/emulator/$PORT
 CA=$EMU_DIR/ca.pem
@@ -286,14 +288,15 @@ check_load_balancer() {
   balancer=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?DNSName=='$hostname'].LoadBalancerArn | [0]" --output text)
   [[ $balancer == arn:* ]] || { say "load-balancer: no ALB in the emulator has DNS name $hostname"; diagnose load-balancer kube-system probes; return 1; }
   group=$(aws elbv2 describe-target-groups --load-balancer-arn "$balancer" --query 'TargetGroups[0].TargetGroupArn' --output text)
-  pod_ip=$(kubectl -n probes get pod -l app=echo -o jsonpath='{.items[0].status.podIP}')
+  # Instance targets: the kind node is the EC2 instance its providerID names, and the
+  # Service's NodePort is the port the target group forwards to.
   for _ in $(seq 60); do
     targets=$(aws elbv2 describe-target-health --target-group-arn "$group" --query 'TargetHealthDescriptions[].Target.Id' --output text)
-    [[ " $targets " == *" $pod_ip "* ]] && break
+    [[ " $targets " == *" $INSTANCE "* ]] && break
     sleep 1
   done
-  say "load-balancer: $balancer targets [$targets], pod $pod_ip"
-  [[ " $targets " == *" $pod_ip "* ]] || { diagnose load-balancer kube-system probes; return 1; }
+  say "load-balancer: $balancer targets [$targets], node instance $INSTANCE"
+  [[ " $targets " == *" $INSTANCE "* ]] || { diagnose load-balancer kube-system probes; return 1; }
 }
 
 check_external_secrets() {
