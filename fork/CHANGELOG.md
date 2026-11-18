@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-18
+
 ### Added
 - `aws-emulator-fork`, a router that builds only the 22 service crates listed in `fork/services.txt` (#1)
 - Seven Terraform acceptance fixtures and `fork/acceptance/run.sh` to run them (#1)
@@ -38,3 +40,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Elastic Load Balancing v2 calls reach the ELBv2 model; the router lacked the Classic front door that serves the shared `elasticloadbalancing` signing name (#1)
 - An RDS instance or cluster created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves that port, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
 - The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)
+
+[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/paulohenriquevn/aws-emulator/releases/tag/v0.1.0

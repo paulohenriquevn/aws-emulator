@@ -142,7 +142,7 @@ upstream ships the fix.
 | STS | `GetCallerIdentity` reports EKS Pod Identity credentials as the associated role's session (`assumed-role/<role>/eks-...`) | not reported yet |
 | EKS Auth | `AssumeRoleForPodIdentity` serves an EKS cluster of the emulator whose tokens a registered external Kubernetes cluster signs | not reported yet |
 | Price List | EC2 instance products carry the `marketoption` attribute (`OnDemand`) | not reported yet |
-| EC2 | Each state an instance moves into is published on EventBridge as an `EC2 Instance State-change Notification`, including the states the clock moves it into | not reported yet |
+| EC2 | Each state an instance moves into is published on EventBridge as an `EC2 Instance State-change Notification`, including the states the clock moves it into | [aws/aws-emulator#549](https://github.com/aws/aws-emulator/issues/549) |
 
 To find every patch: `git grep -n 'fork:' -- services vendor core`.
 
