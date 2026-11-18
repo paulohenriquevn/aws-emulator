@@ -49,28 +49,29 @@ fn on_router_thread(case: impl FnOnce(Router) -> std::pin::Pin<Box<dyn std::futu
 /// (`tests/fixtures/*.pk8`, PKCS #8 DER) and sign nothing outside these tests.
 struct ClusterKey {
     pair: RsaKeyPair,
+    /// The `kid` the key is published and its tokens are signed under.
+    kid: String,
 }
 
 impl ClusterKey {
     /// The key the local cluster signs with.
     fn cluster() -> Self {
-        Self::from_pkcs8(include_bytes!("fixtures/cluster-signing-key.pk8"))
+        let pair = RsaKeyPair::from_pkcs8(include_bytes!("fixtures/cluster-signing-key.pk8")).expect("a PKCS #8 RSA key");
+        let kid = key_id(&pair);
+        Self { pair, kid }
     }
 
-    /// A key the local cluster does not publish.
+    /// A key the local cluster does not publish, signing under the cluster key's `kid`.
     fn impostor() -> Self {
-        Self::from_pkcs8(include_bytes!("fixtures/impostor-signing-key.pk8"))
-    }
-
-    fn from_pkcs8(document: &[u8]) -> Self {
-        Self { pair: RsaKeyPair::from_pkcs8(document).expect("a PKCS #8 RSA key") }
+        let pair = RsaKeyPair::from_pkcs8(include_bytes!("fixtures/impostor-signing-key.pk8")).expect("a PKCS #8 RSA key");
+        Self { pair, kid: Self::cluster().kid }
     }
 
     /// What `kubectl get --raw /openid/v1/jwks` answers.
     fn key_set(&self) -> Value {
         let public: RsaPublicKeyComponents<Vec<u8>> = self.pair.public().into();
         json!({"keys": [{
-            "use": "sig", "kty": "RSA", "alg": "RS256", "kid": "cluster-key",
+            "use": "sig", "kty": "RSA", "alg": "RS256", "kid": self.kid,
             "n": base64url(&public.n), "e": base64url(&public.e),
         }]})
     }
@@ -78,7 +79,7 @@ impl ClusterKey {
     /// A projected service account token for `service_account` in [`NAMESPACE`].
     fn token(&self, issuer: &str, audience: &str, service_account: &str) -> String {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("after the epoch").as_secs();
-        let header = json!({"alg": "RS256", "kid": "cluster-key"});
+        let header = json!({"alg": "RS256", "kid": self.kid});
         let claims = json!({
             "iss": issuer, "aud": [audience], "iat": now, "nbf": now, "exp": now + 3600,
             "sub": format!("system:serviceaccount:{NAMESPACE}:{service_account}"),
@@ -91,6 +92,14 @@ impl ClusterKey {
             .expect("a signature");
         format!("{signing_input}.{}", base64url(&signature))
     }
+}
+
+/// A key id in the form a Kubernetes API server gives its keys: 43 characters of unpadded
+/// base64url over a SHA-256 digest (EKS Auth refuses a `kid` of any other form). This one
+/// digests the modulus; the API server digests the public key's DER encoding.
+fn key_id(pair: &RsaKeyPair) -> String {
+    let public: RsaPublicKeyComponents<Vec<u8>> = pair.public().into();
+    base64url(ring::digest::digest(&ring::digest::SHA256, &public.n).as_ref())
 }
 
 fn base64url(bytes: &[u8]) -> String {
