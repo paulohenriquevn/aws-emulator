@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Added
+- An Application Load Balancer passes a request its `forward` action sends to an `instance` or `ip` target on to that target over HTTP/1.1 and answers with the target's response, with 502 when the target cannot be reached and 504 when it does not answer in time; it answered 502 for every such request (#4)
+- `fork/kubernetes/run.sh` sends a request through the ALB the AWS Load Balancer Controller creates and checks the echo pod answers it (#4)
+
 ## [0.1.0] - 2026-11-18
 
 ### Added
