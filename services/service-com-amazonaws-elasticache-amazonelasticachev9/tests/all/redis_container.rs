@@ -30,7 +30,8 @@ fn container_backend() -> std::sync::MutexGuard<'static, ()> {
 const TOKEN: &str = "a-token-of-sixteen-or-more-chars";
 
 /// Create a Valkey group and answer the host and port its primary endpoint reports once the
-/// container-backed endpoint is attached (an address that is not an `amazonaws.com` name).
+/// group is `available` with the container-backed endpoint attached (an address that is not
+/// an `amazonaws.com` name). A group still `creating` refuses `DeleteReplicationGroup`.
 async fn served_group(emulator: &Emulator, id: &str, extra: &[(&str, &str)]) -> (String, u16) {
     let mut pairs = params(&[
         ("ReplicationGroupId", id),
@@ -46,16 +47,18 @@ async fn served_group(emulator: &Emulator, id: &str, extra: &[(&str, &str)]) -> 
         let described = emulator
             .call("DescribeReplicationGroups", &params(&[("ReplicationGroupId", id)]))
             .await;
-        if let (Some(address), Some(port)) =
-            (described.text("PrimaryEndpoint/Address"), described.text("PrimaryEndpoint/Port"))
-        {
-            if !address.ends_with("amazonaws.com") {
+        if let (Some(address), Some(port), Some(status)) = (
+            described.text("PrimaryEndpoint/Address"),
+            described.text("PrimaryEndpoint/Port"),
+            described.text("ReplicationGroup/Status"),
+        ) {
+            if !address.ends_with("amazonaws.com") && status == "available" {
                 return (address.to_string(), port.parse().expect("a port number"));
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("the group's primary endpoint never became the container-backed listener");
+    panic!("the group never became available with the container-backed listener as its primary endpoint");
 }
 
 /// One RESP command and the first reply line, retried while the server is still starting
