@@ -802,7 +802,7 @@ fn health_check_is_blocked(target: &Checked, held: &Inventory) -> bool {
 }
 
 /// The `GroupId` of every security group one network interface is associated with.
-fn interface_group_ids(interface: &ec2_types::NetworkInterface) -> Vec<String> {
+pub(super) fn interface_group_ids(interface: &ec2_types::NetworkInterface) -> Vec<String> {
     interface
         .groups
         .iter()
@@ -812,7 +812,7 @@ fn interface_group_ids(interface: &ec2_types::NetworkInterface) -> Vec<String> {
 }
 
 /// Every private IPv4 and IPv6 address one network interface holds.
-fn interface_addresses_of(interface: &ec2_types::NetworkInterface) -> Vec<String> {
+pub(super) fn interface_addresses_of(interface: &ec2_types::NetworkInterface) -> Vec<String> {
     let private = interface
         .private_ip_addresses
         .iter()

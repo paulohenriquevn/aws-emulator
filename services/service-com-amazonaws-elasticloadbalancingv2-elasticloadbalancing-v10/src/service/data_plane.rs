@@ -1475,6 +1475,9 @@ fn forward(
     } else {
         super::target_proxy::TargetAddress::Address(target.id.clone())
     };
+    // The load balancer serving this request is where the connection to the target comes
+    // from, as the target's inbound rules name it.
+    let serving = store.load_balancers.get(&listener.load_balancer_arn);
     Performed::Proxy(Box::new(super::target_proxy::Proxied {
         target: address,
         port,
@@ -1482,6 +1485,9 @@ fn forward(
         listener_protocol: listener.protocol.clone(),
         listener_port: listener.port,
         target_group_arn: group.arn.clone(),
+        guarding_group_ids: target.guarded_by.to_vec(),
+        source_group_ids: serving.map(|lb| lb.security_groups.clone()).unwrap_or_default(),
+        source_interface_ids: serving.map(|lb| lb.network_interface_ids.clone()).unwrap_or_default(),
         set_cookie: (distribution.sticky && pinned.is_none()).then(|| {
             super::target_group_selection::set_cookie(
                 &group.arn,

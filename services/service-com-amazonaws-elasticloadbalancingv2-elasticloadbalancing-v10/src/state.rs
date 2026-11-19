@@ -76,7 +76,7 @@ pub use target_health::{
 /// arrive at all.
 pub mod health_check_firewall;
 
-pub use health_check_firewall::{interface_admits_check, CheckSource, GuardingGroups};
+pub use health_check_firewall::{interface_admits_check, traffic_admitted, CheckSource, GuardingGroups};
 
 /// The periodic health check of the registrations a load balancer routes to, and the
 /// host-count series that check is published as.
