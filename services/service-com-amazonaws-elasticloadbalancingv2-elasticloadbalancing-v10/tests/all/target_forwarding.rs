@@ -108,6 +108,29 @@ async fn echo<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut strea
     let _ = stream.shutdown().await;
 }
 
+/// A plain HTTP server meeting a TLS client, as nginx does: it reads what arrives, answers
+/// a plaintext 400 and closes, which fails the client's handshake.
+async fn plaintext_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
+    let port = listener.local_addr().expect("a bound address").port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut hello = [0u8; 512];
+                let _ = stream.read(&mut hello).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
 /// A port nothing listens on: bound once, then released.
 async fn closed_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
@@ -313,7 +336,7 @@ async fn an_https_target_with_a_self_signed_certificate_answers_through_the_load
 
 #[tokio::test]
 async fn an_https_target_that_speaks_no_tls_is_a_bad_gateway() {
-    let (router, dns_name) = forwarding_over(echo_server().await, "HTTPS").await;
+    let (router, dns_name) = forwarding_over(plaintext_server().await, "HTTPS").await;
 
     let (status, _, _) = through(&router, &dns_name, "GET", "/", &[], b"").await;
 
