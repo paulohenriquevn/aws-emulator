@@ -244,6 +244,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .cache_clusters
             .remove(&cache_cluster_id)
             .map(|cluster| cluster.to_modeled(true));
+        // fork: a container-backed cluster's listener closes and its container is removed.
+        store.drop_orphaned_data_endpoints();
 
         Ok(DeleteCacheClusterOutput {
             cache_cluster: deleted,

@@ -29,6 +29,8 @@ mod harness;
 mod modeled_error_surfaces;
 #[path = "all/rbac_users.rs"]
 mod rbac_users;
+#[path = "all/redis_container.rs"]
+mod redis_container;
 #[path = "all/replication_group_lifecycle.rs"]
 mod replication_group_lifecycle;
 // fork: DeleteReplicationGroup, which Terraform destroys a replication group with.

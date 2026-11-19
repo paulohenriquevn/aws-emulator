@@ -928,6 +928,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // provisioning this call starts, which the clock raises when the cluster
         // reaches `available` (see `crate::state::insert_cluster`).
         store.record_cluster_event(&cache_cluster_id, None, "Cache cluster created", now);
+        // fork: a standalone Redis OSS or Valkey cluster is served by a container when the
+        // backend is on (`crate::state::redis_container`).
+        if crate::state::redis_container::docker_backend_configured() {
+            if let Some(cluster) = store.cache_clusters.get(&cache_cluster_id) {
+                if cluster.replication_group_id.is_none() && crate::state::redis_container::serves_engine(&cluster.engine) {
+                    crate::state::redis_container::serve_in_background(
+                        ::std::sync::Arc::clone(&self.engine),
+                        state.clone(),
+                        crate::state::redis_container::ServedCache {
+                            id: cache_cluster_id.clone(),
+                            engine: cluster.engine.clone(),
+                            engine_version: Some(cluster.engine_version.clone()),
+                            password: input.auth_token.clone(),
+                            transit_encryption: cluster.transit_encryption_enabled.unwrap_or(false),
+                            port: cluster.endpoint_port,
+                        },
+                    );
+                }
+            }
+        }
         Ok(CreateCacheClusterOutput {
             cache_cluster: Some(cache_cluster),
         })
