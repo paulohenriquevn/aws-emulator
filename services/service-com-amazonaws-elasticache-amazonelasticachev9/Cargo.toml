@@ -16,7 +16,9 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+# fork: `process` runs docker for the Redis OSS and Valkey containers, and `io-util`/`net`
+# pass a cache connection on to one (`src/state/redis_container.rs`).
+tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "process", "rt"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -59,6 +61,10 @@ service-common = { path = "../common" }
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
+# fork: the container-backed cache suite (`tests/all/redis_container.rs`) reaches a group
+# with transit encryption over TLS.
+rustls = { workspace = true }
+tokio-rustls = "0.26"
 # The encryption suite mounts KMS beside ElastiCache on one engine, because
 # resolving the key a resource names is a call into it.
 service-com-amazonaws-kms-trentservice = { workspace = true }

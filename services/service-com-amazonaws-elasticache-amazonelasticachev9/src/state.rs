@@ -192,6 +192,7 @@ mod engine_versions;
 mod serverless_caches;
 mod migrations;
 mod snapshots;
+pub mod redis_container;
 pub use snapshots::*;
 pub use migrations::*;
 pub use serverless_caches::*;
@@ -3754,6 +3755,10 @@ pub struct ComAmazonawsElasticacheAmazonelasticachev9State {
     /// [`Self::cache_clusters`] beside the standalone ones, so there is one copy
     /// of each cluster however it was created.
     pub replication_groups: BTreeMap<String, ReplicationGroupRecord>,
+    /// fork: the endpoints of the caches a container serves
+    /// ([`redis_container`]), keyed by the replication group or cache cluster id. Dropping
+    /// one closes its listener and removes its container.
+    pub data_endpoints: BTreeMap<String, redis_container::RedisEndpoint>,
     /// Every cache parameter group, keyed by its (lowercased) name, ordered for
     /// the same reason. Unlike the maps above this one is SEEDED when the store
     /// is created, with the default group of every published family (see
@@ -3875,6 +3880,7 @@ impl Default for ComAmazonawsElasticacheAmazonelasticachev9State {
             serverless_caches: BTreeMap::new(),
             serverless_cache_snapshots: BTreeMap::new(),
             replication_groups: BTreeMap::new(),
+            data_endpoints: BTreeMap::new(),
             global_replication_groups: BTreeMap::new(),
             cache_parameter_groups: default_parameter_groups(),
             snapshots: BTreeMap::new(),

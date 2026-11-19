@@ -118,6 +118,9 @@ jobs:
       - name: RDS for PostgreSQL on real PostgreSQL containers
         run: cargo test -p service-com-amazonaws-rds-amazonrdsv19 --test all postgres_container -- --ignored --test-threads=1
 
+      - name: ElastiCache for Valkey on real Valkey containers
+        run: cargo test -p service-com-amazonaws-elasticache-amazonelasticachev9 --test all redis_container -- --ignored --test-threads=1
+
       - name: The TLS test fails without the account-prefixed localhost name
         run: |
           sed -i '/names.insert(1, format!("{}.localhost"/d' vendor/server/src/tls_certificate_authority.rs

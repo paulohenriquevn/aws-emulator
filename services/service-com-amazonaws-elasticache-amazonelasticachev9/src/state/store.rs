@@ -3,6 +3,47 @@
 use super::*;
 
 impl ComAmazonawsElasticacheAmazonelasticachev9State {
+    /// fork: put the container-backed endpoint `endpoint` in front of the replication group
+    /// or cache cluster `id`: the group's primary and reader endpoints and every node of its
+    /// clusters (or of the cluster) now report the emulator listener in front of the
+    /// container. A cache deleted while the endpoint was opened gets none, and the endpoint
+    /// is dropped, which removes its container.
+    pub fn attach_data_endpoint(&mut self, id: &str, endpoint: redis_container::RedisEndpoint) {
+        let address = (endpoint.host.clone(), endpoint.port);
+        let clusters: Vec<String> = if let Some(group) = self.replication_groups.get_mut(id) {
+            group.data_endpoint = Some(address.clone());
+            group
+                .node_groups
+                .iter()
+                .flat_map(|shard| shard.members.iter().map(|member| member.cache_cluster_id.clone()))
+                .collect()
+        } else if self.cache_clusters.contains_key(id) {
+            vec![id.to_string()]
+        } else {
+            return;
+        };
+        for cluster_id in clusters {
+            if let Some(cluster) = self.cache_clusters.get_mut(&cluster_id) {
+                cluster.endpoint_address = address.0.clone();
+                cluster.endpoint_port = address.1;
+                for node in &mut cluster.nodes {
+                    node.endpoint_address = address.0.clone();
+                    node.endpoint_port = address.1;
+                }
+            }
+        }
+        self.data_endpoints.insert(id.to_string(), endpoint);
+    }
+
+    /// fork: drop the container-backed endpoint of every cache that no longer exists, which
+    /// closes its listener and removes its container.
+    pub fn drop_orphaned_data_endpoints(&mut self) {
+        let groups = &self.replication_groups;
+        let clusters = &self.cache_clusters;
+        self.data_endpoints
+            .retain(|id, _| groups.contains_key(id) || clusters.contains_key(id));
+    }
+
     /// The groups `user_id` belongs to, which is what `User$UserGroupIds`
     /// reports.
     ///
@@ -509,6 +550,7 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
     /// Materialise every status change the clock owes, for a caller that is
     /// about to report on all of them.
     pub fn settle_all(&mut self, now: SystemTime) {
+        self.drop_orphaned_data_endpoints();
         // A user's own clock-owed change: the removal `DeleteUser` started.
         self.settle_users(now);
         // A deletion the clock has carried through removes the record before
@@ -1376,6 +1418,7 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
             // `CreateReplicationGroup` does not create the secondary of one.
             global_replication_group_id: None,
             global_member_role: None,
+            data_endpoint: None,
         };
         self.replication_groups
             .insert(new.replication_group_id.clone(), record);

@@ -276,6 +276,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             store.cache_clusters.remove(member);
         }
         store.replication_groups.remove(&key);
+        // fork: a container-backed group's listener closes and its container is removed.
+        store.drop_orphaned_data_endpoints();
         // A user group reports the replication groups it is associated to; a deleted
         // group is associated to nothing.
         for user_group in store.user_groups.values_mut() {

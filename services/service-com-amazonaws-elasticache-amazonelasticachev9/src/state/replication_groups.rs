@@ -432,13 +432,26 @@ impl NodeGroupRecord {
         NodeGroup {
             node_group_id: Some(self.node_group_id.clone()),
             status: Some(self.status.clone()),
-            primary_endpoint: per_node_endpoints.then(|| Endpoint {
-                address: Some(group.primary_endpoint_address()),
-                port: Some(group.port),
+            primary_endpoint: per_node_endpoints.then(|| match &group.data_endpoint {
+                Some((host, port)) => Endpoint {
+                    address: Some(host.clone()),
+                    port: Some(*port),
+                },
+                None => Endpoint {
+                    address: Some(group.primary_endpoint_address()),
+                    port: Some(group.port),
+                },
             }),
-            reader_endpoint: (per_node_endpoints && has_replica).then(|| Endpoint {
-                address: Some(group.reader_endpoint_address()),
-                port: Some(group.port),
+            reader_endpoint: (per_node_endpoints && has_replica).then(|| match &group.data_endpoint {
+                // One container serves the group, so its readers read from the primary.
+                Some((host, port)) => Endpoint {
+                    address: Some(host.clone()),
+                    port: Some(*port),
+                },
+                None => Endpoint {
+                    address: Some(group.reader_endpoint_address()),
+                    port: Some(group.port),
+                },
             }),
             slots: self.slots.clone(),
             node_group_members: Some(
@@ -614,6 +627,9 @@ pub struct ReplicationGroupRecord {
     pub global_replication_group_id: Option<String>,
     /// See [`ReplicationGroupRecord::global_replication_group_id`].
     pub global_member_role: Option<String>,
+    /// fork: the host and port a container-backed group is reached at
+    /// ([`super::redis_container`]), which its primary and reader endpoints report.
+    pub data_endpoint: Option<(String, i32)>,
 }
 
 impl ReplicationGroupRecord {

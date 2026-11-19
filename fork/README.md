@@ -178,6 +178,26 @@ containers or external processes and connects to no other host. This backend bre
 purpose, and only when the variable is set. The ALB target proxy makes the same kind of
 exception: it connects to the registered targets.
 
+## Real Valkey and Redis OSS for ElastiCache
+
+With `EMULATOR_ELASTICACHE_BACKEND=docker`, a replication group with cluster mode disabled and a
+standalone cache cluster of engine `valkey` or `redis` start a container of that engine and major
+version (`EngineVersion=8.0` runs `valkey/valkey:8`; Redis OSS runs `redis:<major>`). `AuthToken`
+becomes the server's `requirepass`, so a command sent before `AUTH` gets the server's own
+`NOAUTH` error. The emulator needs `docker` on its `PATH`. `fork/acceptance/run.sh` turns the
+backend on, and the `data` fixture writes and reads a value over TLS.
+
+The group's primary and reader endpoints, and the endpoint of every node, become an emulator
+listener on the emulator's host, which passes each connection on to the container (loopback
+only). With `TransitEncryptionEnabled` the listener runs TLS with the emulator's certificate from
+the first byte. Deleting the group or the cluster removes the container; containers carry the
+label `aws-emulator.service=elasticache`.
+
+One container serves a whole group, so the reader endpoint reads from the primary and there is
+no replication or failover between nodes. Cluster mode enabled groups, serverless caches and
+Memcached keep the metadata-only behavior. The emulator closes a connection idle for 300
+seconds, which a client's connection pool has to reconnect from.
+
 ## Known limits
 
 - The EKS Pod Identity webhook reads the associations once, when `run.sh` starts it. An
@@ -203,6 +223,7 @@ upstream ships the fix.
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |
 | Elastic Load Balancing v2 | `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule, which `DescribeRules` reports | not reported yet |
+| ElastiCache | `EMULATOR_ELASTICACHE_BACKEND=docker` serves a Valkey or Redis OSS group or cluster from a real server in a container (`src/state/redis_container.rs`) | not reported yet |
 | Elastic Load Balancing v2 | A `forward` to an `instance` or `ip` target group passes the request on to the target over HTTP/1.1 (`src/service/target_proxy.rs`) instead of answering 502 | not reported yet |
 | Elastic Load Balancing v2 | An `HTTPS` target group is reached over TLS without validating the target's certificate, and a forwarded request answers 502 when no inbound rule of the target's security groups admits the load balancer on the traffic port (`src/service/target_proxy.rs`, `traffic_admitted` in `src/state/health_check_firewall.rs`) | not reported yet |
 | RDS | `EMULATOR_RDS_BACKEND=docker` serves a PostgreSQL DB instance with a real PostgreSQL server in a container (`src/state/data_plane/postgres_container.rs`) | not reported yet |
