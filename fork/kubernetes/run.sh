@@ -14,7 +14,8 @@
 #        irsa                  an annotated pod is the IRSA role (sts get-caller-identity)
 #        pod-identity          an associated pod gets the role's credentials from the agent
 #        load-balancer         the AWS Load Balancer Controller (IRSA) turns an Ingress into
-#                              an ALB in the emulator, with the node registered as a target
+#                              an ALB in the emulator, with the node registered as a target,
+#                              and a request to the ALB's name reaches the echo pod
 #        external-secrets      External Secrets (IRSA) copies a Secrets Manager secret into
 #                              a Kubernetes Secret
 #        opencost              OpenCost prices the node from the emulator's EC2 price list
@@ -45,7 +46,21 @@ REGION=us-east-1
 CLUSTER=operations
 KIND_CLUSTER=aws-emulator
 NODE_INSTANCE_TYPE=t3.medium
-VPC_CIDR=10.244.0.0/16
+# The kind node's Docker network IS the EKS cluster's VPC, so a load balancer target the
+# emulator dials is reachable from the host. The node instance is launched at
+# NODE_INSTANCE_IP before kind starts (kubelet takes its providerID at registration, and the
+# API server only lets a providerID be set from empty), and that address is then added to
+# the node container's interface. Docker hands containers addresses of NODE_IP_RANGE only,
+# so it never hands out NODE_INSTANCE_IP, which is in the node's subnet and none of the
+# addresses EC2 reserves.
+KIND_NETWORK=${KIND_NETWORK:-aws-emulator-kind}
+VPC_CIDR=${KIND_NETWORK_CIDR:-172.29.0.0/16}
+NODE_SUBNET_CIDR=${VPC_CIDR%.*.*}.0.0/17
+OTHER_SUBNET_CIDR=${VPC_CIDR%.*.*}.128.0/17
+NODE_IP_RANGE=${VPC_CIDR%.*.*}.1.0/24
+NETWORK_GATEWAY=${VPC_CIDR%.*.*}.0.1
+NODE_INSTANCE_IP=${VPC_CIDR%.*.*}.100.10
+POD_CIDR=10.244.0.0/16
 LOG=$WORK/run.log
 
 # Pinned versions of everything the cluster runs.
@@ -79,15 +94,21 @@ cleanup() {
     return
   fi
   kind delete cluster --name "$KIND_CLUSTER" >>"$LOG" 2>&1 || true
+  if [[ ${CREATED_NETWORK:-0} == 1 ]]; then docker network rm "$KIND_NETWORK" >>"$LOG" 2>&1 || true; fi
   if [[ -n ${EMU_PID:-} ]]; then kill "$EMU_PID" 2>/dev/null || true; wait "$EMU_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 
 # --- 1. The emulator, on the Docker network kind uses ------------------------------------
 
-docker network inspect kind >/dev/null 2>&1 || docker network create kind >>"$LOG"
-GATEWAY=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | tr ' ' '\n' | grep -E '^[0-9]+(\.[0-9]+){3}$' | head -1)
-[[ -n $GATEWAY ]] || fail "the kind Docker network has no IPv4 gateway"
+if ! docker network inspect "$KIND_NETWORK" >/dev/null 2>&1; then
+  docker network create "$KIND_NETWORK" --driver bridge --subnet "$VPC_CIDR" --ip-range "$NODE_IP_RANGE" \
+    --gateway "$NETWORK_GATEWAY" -o com.docker.network.bridge.enable_ip_masquerade=true >>"$LOG" || fail "creating the Docker network $KIND_NETWORK"
+  CREATED_NETWORK=1
+fi
+export KIND_EXPERIMENTAL_DOCKER_NETWORK=$KIND_NETWORK
+GATEWAY=$(docker network inspect "$KIND_NETWORK" -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | tr ' ' '\n' | grep -E '^[0-9]+(\.[0-9]+){3}$' | head -1)
+[[ -n $GATEWAY ]] || fail "the Docker network $KIND_NETWORK has no IPv4 gateway"
 
 EMU_HOME=$WORK/home
 mkdir -p "$EMU_HOME"
@@ -113,7 +134,7 @@ say "emulator at $AWS_ENDPOINT_URL, account $ACCOUNT"
 
 VPC=$(aws ec2 create-vpc --cidr-block "$VPC_CIDR" --query Vpc.VpcId --output text)
 SUBNETS=()
-for spec in 10.244.0.0/17:${REGION}a 10.244.128.0/17:${REGION}b; do
+for spec in $NODE_SUBNET_CIDR:${REGION}a $OTHER_SUBNET_CIDR:${REGION}b; do
   SUBNETS+=("$(aws ec2 create-subnet --vpc-id "$VPC" --cidr-block "${spec%%:*}" --availability-zone "${spec##*:}" \
     --tag-specifications "ResourceType=subnet,Tags=[{Key=kubernetes.io/role/internal-elb,Value=1},{Key=kubernetes.io/cluster/$CLUSTER,Value=shared}]" \
     --query Subnet.SubnetId --output text)")
@@ -125,14 +146,15 @@ aws eks wait cluster-active --name "$CLUSTER"
 ISSUER=$(aws eks describe-cluster --name "$CLUSTER" --query cluster.identity.oidc.issuer --output text)
 # The node's EC2 instance, which OpenCost reads the instance type and Region of.
 AMI=$(aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.34/amazon-linux-2023/x86_64/standard/recommended/image_id --query Parameter.Value --output text)
-INSTANCE=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$NODE_INSTANCE_TYPE" --subnet-id "${SUBNETS[0]}" --query 'Instances[0].InstanceId' --output text)
-say "EKS cluster $CLUSTER, issuer $ISSUER, VPC $VPC, node instance $INSTANCE"
+INSTANCE=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$NODE_INSTANCE_TYPE" --subnet-id "${SUBNETS[0]}" \
+  --private-ip-address "$NODE_INSTANCE_IP" --query 'Instances[0].InstanceId' --output text) || fail "launching the node instance at $NODE_INSTANCE_IP"
+say "EKS cluster $CLUSTER, issuer $ISSUER, VPC $VPC, node instance $INSTANCE at $NODE_INSTANCE_IP"
 
 cat >"$WORK/kind.yaml" <<EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
-  podSubnet: $VPC_CIDR
+  podSubnet: $POD_CIDR
 nodes:
 - role: control-plane
   labels:
@@ -141,15 +163,15 @@ nodes:
     topology.kubernetes.io/zone: ${REGION}a
   kubeadmConfigPatches:
   - |
-    kind: ClusterConfiguration
-    apiServer:
-      extraArgs:
-        service-account-issuer: $ISSUER
-  - |
     kind: InitConfiguration
     nodeRegistration:
       kubeletExtraArgs:
         provider-id: aws:///${REGION}a/$INSTANCE
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        service-account-issuer: $ISSUER
   extraMounts:
   - hostPath: $WORK/price-list
     containerPath: /price-list
@@ -157,6 +179,12 @@ EOF
 mkdir -p "$WORK/price-list"
 kind delete cluster --name "$KIND_CLUSTER" >>"$LOG" 2>&1 || true
 kind create cluster --name "$KIND_CLUSTER" --config "$WORK/kind.yaml" --kubeconfig "$KUBECONFIG" --wait 120s >>"$LOG" 2>&1 || fail "kind create cluster; see $LOG"
+
+# The node instance's private address, on the node container's interface: the host reaches
+# it over the Docker bridge, and kube-proxy serves a NodePort on every local address.
+NODE=$KIND_CLUSTER-control-plane
+docker exec "$NODE" ip addr add "$NODE_INSTANCE_IP/32" dev eth0 >>"$LOG" 2>&1 || fail "adding $NODE_INSTANCE_IP to the kind node"
+say "node $NODE answers at $NODE_INSTANCE_IP for instance $INSTANCE"
 
 # kind's API server now signs as the EKS cluster's issuer: register its key set for it.
 kubectl get --raw /openid/v1/jwks >"$WORK/jwks.json"
@@ -297,6 +325,24 @@ check_load_balancer() {
   done
   say "load-balancer: $balancer targets [$targets], node instance $INSTANCE"
   [[ " $targets " == *" $INSTANCE "* ]] || { diagnose load-balancer kube-system probes; return 1; }
+  local health=
+  for _ in $(seq 120); do
+    health=$(aws elbv2 describe-target-health --target-group-arn "$group" --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
+    [[ $health == healthy ]] && break
+    sleep 1
+  done
+  say "load-balancer: target health $health"
+  [[ $health == healthy ]] || { diagnose load-balancer kube-system probes; return 1; }
+  # Real traffic: a request to the ALB's name, at the emulator's endpoint, is passed on to
+  # the node's NodePort and answered by the echo pod's nginx.
+  local page=
+  for _ in $(seq 30); do
+    page=$(curl -s --max-time 10 --cacert "$CA" -H "Host: $hostname" "$AWS_ENDPOINT_URL/" || true)
+    [[ $page == *"Welcome to nginx!"* ]] && break
+    sleep 2
+  done
+  say "load-balancer: GET http://$hostname/ answered: $(printf '%s' "$page" | tr -s '[:space:]' ' ' | cut -c1-120)"
+  [[ $page == *"Welcome to nginx!"* ]] || { diagnose load-balancer kube-system probes; return 1; }
 }
 
 check_external_secrets() {

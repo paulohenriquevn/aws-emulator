@@ -90,7 +90,7 @@ authentication on, the route takes only requests signed with the emulator's own 
 |---|---|
 | `irsa` | A pod whose service account is annotated with a role is that role (`sts get-caller-identity`). |
 | `pod-identity` | A pod whose service account has a pod identity association gets the role's credentials from the EKS Pod Identity Agent. |
-| `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with the kind node's instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target). |
+| `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with the kind node's instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target), the target healthy, and a request to the ALB's name answered by the echo pod's nginx. |
 | `external-secrets` | External Secrets, on IRSA, copies a Secrets Manager secret into a Kubernetes Secret. |
 | `opencost` | OpenCost reports the node's hourly cost as the emulator's on-demand price for its instance type. |
 
@@ -108,6 +108,15 @@ which the Kubernetes API refuses as the hostname of an Ingress status, so the co
 never report the load balancer. Without sockets the load balancer publishes
 `<name>-<id>.<region>.elb.amazonaws.com` and is served at the emulator's endpoint for a request
 whose `Host` is that name.
+
+The ALB passes that request on to its target (`target_proxy.rs`, below). For the target to be
+reachable, the kind node runs on a Docker network of its own (`aws-emulator-kind`,
+`172.29.0.0/16`, override with `KIND_NETWORK` and `KIND_NETWORK_CIDR`) that is also the EKS
+cluster's VPC. The node's EC2 instance is launched at `172.29.100.10` before kind starts, so
+kubelet registers the node with that instance as its `providerID` (the API server lets a
+`providerID` be set only from empty, and kind sets one of its own otherwise). That address is then
+added to the node container's interface. Docker hands out addresses of `172.29.1.0/24` only, so
+it never gives the instance's address to a container.
 
 It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git, and network
 access for images and charts. The emulator listens on the gateway of kind's Docker network
@@ -137,6 +146,7 @@ upstream ships the fix.
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |
 | Elastic Load Balancing v2 | `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule, which `DescribeRules` reports | not reported yet |
+| Elastic Load Balancing v2 | A `forward` to an `instance` or `ip` target group passes the request on to the target over HTTP/1.1 (`src/service/target_proxy.rs`) instead of answering 502 | not reported yet |
 | Elastic Load Balancing v2 | `EMULATOR_ELB_LISTENER_SOCKETS=off` makes an Application Load Balancer publish an `elb.amazonaws.com` name instead of a socket's `host:port` | not reported yet |
 | Elastic Load Balancing v2 | An unsigned form `POST /` on the emulator's endpoint (STS `AssumeRoleWithWebIdentity`) is not claimed as load balancer traffic, so it no longer answers `500 AmbiguousService` beside an ALB with a rule for `/` | not reported yet |
 | STS | `GetCallerIdentity` reports EKS Pod Identity credentials as the associated role's session (`assumed-role/<role>/eks-...`) | not reported yet |

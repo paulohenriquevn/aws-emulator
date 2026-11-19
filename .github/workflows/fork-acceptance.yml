@@ -113,6 +113,7 @@ jobs:
           replication_group_deletion
           default_rule_tags
           unsigned_query_calls
+          target_forwarding
 
       - name: The TLS test fails without the account-prefixed localhost name
         run: |

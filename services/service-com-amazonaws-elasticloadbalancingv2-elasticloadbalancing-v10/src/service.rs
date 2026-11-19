@@ -91,6 +91,8 @@ pub mod shared_endpoint;
 pub mod data_plane;
 
 pub mod lambda_target;
+// fork: a `forward` to an `instance` or `ip` target group, passed on to the target.
+pub mod target_proxy;
 
 pub mod target_group_selection;
 

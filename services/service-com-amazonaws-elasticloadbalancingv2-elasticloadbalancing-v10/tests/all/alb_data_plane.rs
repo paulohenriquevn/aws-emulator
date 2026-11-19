@@ -482,7 +482,7 @@ async fn a_listener_answers_a_request_from_the_rule_its_conditions_match() {
             location: Some("http://new.example.com/old"),
             ..answers("a redirect", "GET", "/old", 301, "")
         },
-        // A forward names targets with no server of this emulator's behind them.
+        // A forward to an instance EC2 holds no running record of has no address to dial.
         answers("a forward to a healthy target", "GET", "/tg", 502, ""),
         answers("a forward to a group with no target", "GET", "/empty", 503, ""),
         // An action this emulator cannot perform is not bypassed.
