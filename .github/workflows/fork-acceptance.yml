@@ -115,6 +115,9 @@ jobs:
           unsigned_query_calls
           target_forwarding
 
+      - name: RDS for PostgreSQL on real PostgreSQL containers
+        run: cargo test -p service-com-amazonaws-rds-amazonrdsv19 --test postgres_container
+
       - name: The TLS test fails without the account-prefixed localhost name
         run: |
           sed -i '/names.insert(1, format!("{}.localhost"/d' vendor/server/src/tls_certificate_authority.rs
