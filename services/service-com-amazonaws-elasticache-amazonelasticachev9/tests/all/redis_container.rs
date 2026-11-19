@@ -109,6 +109,28 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, commands: &
     replies
 }
 
+type TlsStream = tokio_rustls::client::TlsStream<TcpStream>;
+
+/// A TLS connection to the endpoint of a group with transit encryption (`AuthToken` needs it,
+/// as on AWS).
+async fn tls_connection(host: &str, port: u16) -> TlsStream {
+    let tcp = TcpStream::connect((host, port)).await.expect("a connection");
+    tls_connector()
+        .connect(rustls::pki_types::ServerName::try_from("localhost").expect("a name"), tcp)
+        .await
+        .expect("a TLS handshake with the endpoint")
+}
+
+fn over_tls(host: String, port: u16) -> impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = TlsStream>>> {
+    move || {
+        let host = host.clone();
+        Box::pin(async move { tls_connection(&host, port).await })
+    }
+}
+
+/// The settings of a group with an `AuthToken`, which AWS accepts only with transit encryption.
+const WITH_AUTH: [(&str, &str); 2] = [("AuthToken", TOKEN), ("TransitEncryptionEnabled", "true")];
+
 fn plain(host: String, port: u16) -> impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = TcpStream>>> {
     move || {
         let host = host.clone();
@@ -121,9 +143,9 @@ fn plain(host: String, port: u16) -> impl Fn() -> std::pin::Pin<Box<dyn std::fut
 async fn a_command_without_auth_is_refused_with_noauth() {
     let _backend = container_backend();
     let emulator = Emulator::new();
-    let (host, port) = served_group(&emulator, "noauth-group", &[("AuthToken", TOKEN)]).await;
+    let (host, port) = served_group(&emulator, "noauth-group", &WITH_AUTH).await;
 
-    let reply = command_over(plain(host, port), &["GET", "k"]).await;
+    let reply = command_over(over_tls(host, port), &["GET", "k"]).await;
 
     assert!(reply.starts_with("-NOAUTH"), "{reply:?}");
 }
@@ -133,9 +155,9 @@ async fn a_command_without_auth_is_refused_with_noauth() {
 async fn a_value_set_through_the_primary_endpoint_is_read_back() {
     let _backend = container_backend();
     let emulator = Emulator::new();
-    let (host, port) = served_group(&emulator, "set-get-group", &[("AuthToken", TOKEN)]).await;
-    command_over(plain(host.clone(), port), &["AUTH", TOKEN]).await;
-    let mut stream = TcpStream::connect((host.as_str(), port)).await.expect("a connection");
+    let (host, port) = served_group(&emulator, "set-get-group", &WITH_AUTH).await;
+    command_over(over_tls(host.clone(), port), &["AUTH", TOKEN]).await;
+    let mut stream = tls_connection(&host, port).await;
 
     let replies = exchange(&mut stream, &[&["AUTH", TOKEN][..], &["SET", "k", "v"][..], &["GET", "k"][..]]).await;
 
@@ -147,24 +169,9 @@ async fn a_value_set_through_the_primary_endpoint_is_read_back() {
 async fn a_group_with_transit_encryption_is_reached_over_tls() {
     let _backend = container_backend();
     let emulator = Emulator::new();
-    let (host, port) = served_group(
-        &emulator,
-        "tls-group",
-        &[("AuthToken", TOKEN), ("TransitEncryptionEnabled", "true")],
-    )
-    .await;
-    let connect = move || {
-        let host = host.clone();
-        Box::pin(async move {
-            let tcp = TcpStream::connect((host.as_str(), port)).await.expect("a connection");
-            tls_connector()
-                .connect(rustls::pki_types::ServerName::try_from("localhost").expect("a name"), tcp)
-                .await
-                .expect("a TLS handshake with the endpoint")
-        }) as std::pin::Pin<Box<dyn std::future::Future<Output = tokio_rustls::client::TlsStream<TcpStream>>>>
-    };
+    let (host, port) = served_group(&emulator, "tls-group", &WITH_AUTH).await;
 
-    let reply = command_over(connect, &["PING"]).await;
+    let reply = command_over(over_tls(host, port), &["PING"]).await;
 
     assert!(reply.starts_with("-NOAUTH"), "a server answered over TLS: {reply:?}");
 }
