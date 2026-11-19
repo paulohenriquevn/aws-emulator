@@ -122,6 +122,36 @@ It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git,
 access for images and charts. The emulator listens on the gateway of kind's Docker network
 (`-b`), and every pod that calls it mounts its CA. The `kubernetes` job of the workflow runs it.
 
+## Real PostgreSQL for RDS
+
+With `EMULATOR_RDS_BACKEND=docker`, `CreateDBInstance` for engine `postgres` starts a
+`postgres:<major version>` container (`EngineVersion=16.6` runs `postgres:16`; no version runs
+`postgres:17`) with the master user, its password (the request's, or the one RDS generated for
+the managed secret) and `DBName`. `EMULATOR_RDS_POSTGRES_IMAGE` replaces the `postgres`
+repository, for a mirror. The emulator needs `docker` on its `PATH` and access to the Docker
+daemon. `fork/acceptance/run.sh` turns the backend on.
+
+The published `Endpoint` is still the emulator's own listener, so the configured `Port`, the
+instance status and TLS stay the emulator's. The listener answers `SSLRequest` with the
+emulator's certificate, which the emulator CA bundle verifies. It refuses a session while the
+instance is not `available`, and a plaintext session while `rds.force_ssl` is on (the default
+from PostgreSQL 15), with PostgreSQL's own errors. It then passes the session on to the
+container, which listens on loopback only. A reboot or a stop closes the open sessions,
+`ModifyDBInstance` with `MasterUserPassword` (or a rotation of the managed secret) changes the
+password in the server, and `DeleteDBInstance` removes the container. Containers carry the label
+`aws-emulator.service=rds`, so `docker rm -f $(docker ps -aq --filter label=aws-emulator.service=rds)`
+removes the ones an emulator that was killed left behind.
+
+Read replicas, instances restored from a snapshot, members of a DB cluster and MySQL instances
+still use the in-process engine. Data lives in the container and is lost with it: a snapshot does
+not copy it. A session waits up to 30 seconds for a container that is still starting (the first
+start pulls the image) and is then refused as a server that is starting up.
+
+Upstream's engine contract (`vendor/engine/src/lib.rs`) says a generated emulator runs no
+containers or external processes and connects to no other host. This backend breaks that on
+purpose, and only when the variable is set. The ALB target proxy makes the same kind of
+exception: it connects to the registered targets.
+
 ## Known limits
 
 - The EKS Pod Identity webhook reads the associations once, when `run.sh` starts it. An
@@ -147,6 +177,7 @@ upstream ships the fix.
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |
 | Elastic Load Balancing v2 | `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule, which `DescribeRules` reports | not reported yet |
 | Elastic Load Balancing v2 | A `forward` to an `instance` or `ip` target group passes the request on to the target over HTTP/1.1 (`src/service/target_proxy.rs`) instead of answering 502 | not reported yet |
+| RDS | `EMULATOR_RDS_BACKEND=docker` serves a PostgreSQL DB instance with a real PostgreSQL server in a container (`src/state/data_plane/postgres_container.rs`) | not reported yet |
 | Elastic Load Balancing v2 | `EMULATOR_ELB_LISTENER_SOCKETS=off` makes an Application Load Balancer publish an `elb.amazonaws.com` name instead of a socket's `host:port` | not reported yet |
 | Elastic Load Balancing v2 | An unsigned form `POST /` on the emulator's endpoint (STS `AssumeRoleWithWebIdentity`) is not claimed as load balancer traffic, so it no longer answers `500 AmbiguousService` beside an ALB with a rule for `/` | not reported yet |
 | STS | `GetCallerIdentity` reports EKS Pod Identity credentials as the associated role's session (`assumed-role/<role>/eks-...`) | not reported yet |

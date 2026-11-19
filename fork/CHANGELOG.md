@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 - An Application Load Balancer passes a request its `forward` action sends to an `instance` or `ip` target on to that target over HTTP/1.1 and answers with the target's response, with 502 when the target cannot be reached and 504 when it does not answer in time; it answered 502 for every such request (#4)
+- `EMULATOR_RDS_BACKEND=docker` serves an RDS for PostgreSQL DB instance with a real PostgreSQL server of its major version in a container, behind the instance's own endpoint, which keeps the instance status, `rds.force_ssl` and TLS with the emulator's certificate (#5)
+- The `data` acceptance fixture logs in to its RDS instance with the managed secret over TLS and installs `pgcrypto` (#5)
 - `fork/kubernetes/run.sh` runs kind on a Docker network that is also the EKS cluster's VPC, gives the node container the node instance's private address, and sends a request through the ALB the AWS Load Balancer Controller creates and checks the echo pod answers it (#4)
 
 ## [0.1.0] - 2026-11-18

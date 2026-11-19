@@ -998,6 +998,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             database_insights_mode: Some(record.database_insights_mode.clone()),
         };
         let renamed_key = (region.clone(), record.identifier.clone());
+        // fork: the master user a PostgreSQL container's password change is made for.
+        let container_username = record.master_username.clone();
         store.db_instances.insert(renamed_key.clone(), record);
         // A rename moves the instance to a new key, and its engine endpoint moves with
         // it: the listener a client is connected to stays the endpoint this instance
@@ -1013,6 +1015,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             directory
                 .lock()
                 .record_monitoring(&dbi_resource_id, monitoring);
+        }
+
+        // fork: an instance served by a PostgreSQL container changes the password in that
+        // server too, with the store's guard released. The modification is already
+        // accepted, as RDS applies it after answering, so a failure is logged as an error
+        // naming the container rather than reported to the caller. Nothing is awaited here:
+        // the store's guard would be held across the await.
+        let new_password = rotated_master_user_password
+            .clone()
+            .or_else(|| input.master_user_password.clone());
+        let container = new_password.as_ref().and_then(|_| {
+            store
+                .engine_endpoint(&renamed_key)
+                .and_then(|endpoint| endpoint.container().cloned())
+        });
+        drop(store);
+        if let (Some(container), Some(password), Some(username)) =
+            (container, new_password, container_username)
+        {
+            container.change_master_password(username, password);
         }
 
         Ok(ModifyDBInstanceOutput {
