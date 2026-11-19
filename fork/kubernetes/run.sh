@@ -404,7 +404,8 @@ check_load_balancer() {
   local wanted=() worker id missing
   for worker in "${WORKERS[@]}"; do read -r id _ <<<"$worker"; wanted+=("$id"); done
   for _ in $(seq 60); do
-    targets=$(aws elbv2 describe-target-health --target-group-arn "$group" --query 'TargetHealthDescriptions[].Target.Id' --output text)
+    # --output text separates the ids with tabs.
+    targets=$(aws elbv2 describe-target-health --target-group-arn "$group" --query 'TargetHealthDescriptions[].Target.Id' --output text | tr '\t' ' ')
     missing=
     for id in "${wanted[@]}"; do [[ " $targets " == *" $id "* ]] || missing+=" $id"; done
     [[ -z $missing ]] && break
