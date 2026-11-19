@@ -462,8 +462,11 @@ async fn a_modified_master_password_is_the_one_that_logs_in() {
 async fn a_deleted_instance_leaves_no_container_behind() {
     let _serial = container_backend();
     let router = emulator();
-    let (_, resource_id) = available_instance(&router, "pg-delete", "16").await;
+    let (port, resource_id) = available_instance(&router, "pg-delete", "16").await;
     let name = postgres_container::container_name(&resource_id);
+    // The instance reports `available` on its own clock, while the first case to run may
+    // still be pulling the image; a login waits for the server.
+    login(port, true, MASTER_USER, MASTER_PASSWORD).await.expect("the master user logs in over TLS");
     assert!(container_exists(&name), "{name} runs while the instance exists");
 
     let (status, body) = call(
