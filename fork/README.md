@@ -177,6 +177,7 @@ upstream ships the fix.
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |
 | Elastic Load Balancing v2 | `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule, which `DescribeRules` reports | not reported yet |
 | Elastic Load Balancing v2 | A `forward` to an `instance` or `ip` target group passes the request on to the target over HTTP/1.1 (`src/service/target_proxy.rs`) instead of answering 502 | not reported yet |
+| Elastic Load Balancing v2 | An `HTTPS` target group is reached over TLS without validating the target's certificate, and a forwarded request answers 502 when no inbound rule of the target's security groups admits the load balancer on the traffic port (`src/service/target_proxy.rs`, `traffic_admitted` in `src/state/health_check_firewall.rs`) | not reported yet |
 | RDS | `EMULATOR_RDS_BACKEND=docker` serves a PostgreSQL DB instance with a real PostgreSQL server in a container (`src/state/data_plane/postgres_container.rs`) | not reported yet |
 | Elastic Load Balancing v2 | `EMULATOR_ELB_LISTENER_SOCKETS=off` makes an Application Load Balancer publish an `elb.amazonaws.com` name instead of a socket's `host:port` | not reported yet |
 | Elastic Load Balancing v2 | An unsigned form `POST /` on the emulator's endpoint (STS `AssumeRoleWithWebIdentity`) is not claimed as load balancer traffic, so it no longer answers `500 AmbiguousService` beside an ALB with a rule for `/` | not reported yet |

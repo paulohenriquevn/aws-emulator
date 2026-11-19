@@ -4,9 +4,16 @@
 //!
 //! An Application Load Balancer opens a connection to the target it chose and passes the
 //! client's request on to it. This module does that for a target group whose protocol is
-//! HTTP: it dials the target's address on the port the registration gives (an `ip` target's
-//! own address, or the private IPv4 address EC2 holds for an `instance` target), sends the
-//! request over HTTP/1.1, and answers the client with what the target answered.
+//! HTTP or HTTPS: it dials the target's address on the port the registration gives (an `ip`
+//! target's own address, or the private IPv4 address EC2 holds for an `instance` target),
+//! sends the request over HTTP/1.1, and answers the client with what the target answered.
+//!
+//! For an HTTPS target group the connection is TLS, and the target's certificate is not
+//! checked: "the load balancer establishes TLS connections with the targets using
+//! certificates that you install on the targets. The load balancer does not validate these
+//! certificates" (Elastic Load Balancing User Guide, "Target groups for your Application Load
+//! Balancers"). A self-signed certificate, an expired one and one naming another host are
+//! all accepted; the handshake's own signature checks still apply.
 //!
 //! What the load balancer changes on the way, as an Application Load Balancer does
 //! ("HTTP headers and Application Load Balancers", Elastic Load Balancing User Guide): the
@@ -17,8 +24,7 @@
 //! What it answers when the target does not: [`TARGET_UNREACHABLE_STATUS`] (502) when the
 //! address cannot be resolved, the connection is refused, or the answer is not HTTP, and
 //! [`TARGET_TIMEOUT_STATUS`] (504) when the target does not answer within the load
-//! balancer's default idle timeout. An HTTPS target group is not dialled: this module speaks
-//! no TLS to targets, so such a forward keeps the 502 it had.
+//! balancer's default idle timeout. A TLS handshake the target fails is a 502.
 
 use std::time::Duration;
 
@@ -65,13 +71,20 @@ pub(super) struct Proxied {
     pub(super) target: TargetAddress,
     /// The port the registration receives traffic on.
     pub(super) port: u16,
-    /// The target group's protocol; only HTTP is dialled.
+    /// The target group's protocol: HTTP, or HTTPS for a TLS connection to the target.
     pub(super) target_protocol: Option<String>,
     /// The listener the request reached, which `X-Forwarded-Proto` and `X-Forwarded-Port`
     /// name.
     pub(super) listener_protocol: Option<String>,
     pub(super) listener_port: Option<i32>,
     pub(super) target_group_arn: String,
+    /// The security groups the scheduler running the target's workload declared; empty for
+    /// a target whose groups are those of the interface holding its address.
+    pub(super) guarding_group_ids: Vec<String>,
+    /// The serving load balancer's security groups and own network interfaces: where the
+    /// connection to the target comes from.
+    pub(super) source_group_ids: Vec<String>,
+    pub(super) source_interface_ids: Vec<String>,
     /// The target-group stickiness cookie the answer hands back, for a client that does not
     /// hold it yet, as a `lambda` target's answer does.
     pub(super) set_cookie: Option<String>,
@@ -100,19 +113,14 @@ pub(super) async fn served<Eng: Send + Sync + 'static>(
     request: &DataPlaneRequest,
     body: &[u8],
 ) -> Served {
-    if !proxied
-        .target_protocol
-        .as_deref()
-        .is_some_and(|protocol| protocol.eq_ignore_ascii_case("HTTP"))
-    {
+    let Some(transport) = proxied.target_protocol.as_deref().and_then(Transport::of) else {
         tracing::warn!(
             target_group = %proxied.target_group_arn,
             protocol = ?proxied.target_protocol,
-            "the target group's protocol is not HTTP, and this emulator dials targets over HTTP \
-             only, so the target was not reached"
+            "the target group's protocol is neither HTTP nor HTTPS, so the target was not reached"
         );
         return Served::status(TARGET_UNREACHABLE_STATUS);
-    }
+    };
     let Some(address) = target_address(engine, &proxied.target) else {
         tracing::warn!(
             target_group = %proxied.target_group_arn,
@@ -122,7 +130,27 @@ pub(super) async fn served<Eng: Send + Sync + 'static>(
         );
         return Served::status(TARGET_UNREACHABLE_STATUS);
     };
-    match exchange(&address, proxied, request, body).await {
+    // The traffic port is governed by the target's security groups as the health-check port
+    // is: a connection no inbound rule admits does not arrive, so nothing answers it.
+    if crate::state::traffic_admitted(
+        engine,
+        &proxied.guarding_group_ids,
+        &proxied.source_group_ids,
+        &proxied.source_interface_ids,
+        &address,
+        i32::from(proxied.port),
+    ) == Some(false)
+    {
+        tracing::warn!(
+            target_group = %proxied.target_group_arn,
+            %address,
+            port = proxied.port,
+            "no inbound rule of the target's security groups admits the load balancer on the \
+             traffic port, so the connection to it was not made"
+        );
+        return Served::status(TARGET_UNREACHABLE_STATUS);
+    }
+    match exchange(&address, transport, proxied, request, body).await {
         Ok(mut served) => {
             if let Some(field) = proxied.set_cookie.clone() {
                 served.headers.push(("set-cookie".to_string(), field));
@@ -158,16 +186,120 @@ fn target_address<Eng: Send + Sync + 'static>(engine: &Eng, target: &TargetAddre
     }
 }
 
+/// How the connection to a target is made: the target group's protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Transport {
+    Http,
+    Https,
+}
+
+impl Transport {
+    /// The transport of a target group's `Protocol`, when it is one this module dials.
+    pub(super) fn of(protocol: &str) -> Option<Self> {
+        if protocol.eq_ignore_ascii_case("HTTP") {
+            Some(Self::Http)
+        } else if protocol.eq_ignore_ascii_case("HTTPS") {
+            Some(Self::Https)
+        } else {
+            None
+        }
+    }
+}
+
+/// A connection to a target, plain or TLS.
+trait TargetStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> TargetStream for T {}
+
+/// Open the connection to the target, running the TLS handshake for an HTTPS group.
+async fn connect(address: &str, port: u16, transport: Transport) -> Result<Box<dyn TargetStream>, Failure> {
+    let opened = tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let tcp = tokio::net::TcpStream::connect((address, port))
+            .await
+            .map_err(|error| Failure::Unreachable(format!("connect: {error}")))?;
+        match transport {
+            Transport::Http => Ok::<Box<dyn TargetStream>, Failure>(Box::new(tcp)),
+            Transport::Https => {
+                let server_name = ::rustls::pki_types::ServerName::try_from(address.to_string())
+                    .map_err(|error| Failure::Unreachable(format!("server name {address}: {error}")))?;
+                let tls = target_tls_connector()
+                    .connect(server_name, tcp)
+                    .await
+                    .map_err(|error| Failure::Unreachable(format!("TLS handshake: {error}")))?;
+                Ok(Box::new(tls) as Box<dyn TargetStream>)
+            }
+        }
+    })
+    .await
+    .map_err(|_| Failure::TimedOut)??;
+    Ok(opened)
+}
+
+/// The TLS client a load balancer dials HTTPS targets with: any certificate is accepted
+/// (see the module documentation), and the handshake's signatures are still verified.
+fn target_tls_connector() -> tokio_rustls::TlsConnector {
+    static CONNECTOR: std::sync::OnceLock<tokio_rustls::TlsConnector> = std::sync::OnceLock::new();
+    CONNECTOR
+        .get_or_init(|| {
+            let provider = std::sync::Arc::new(::rustls::crypto::aws_lc_rs::default_provider());
+            let config = ::rustls::ClientConfig::builder_with_provider(std::sync::Arc::clone(&provider))
+                .with_safe_default_protocol_versions()
+                .expect("the aws-lc-rs provider supports the default TLS versions")
+                .dangerous()
+                .with_custom_certificate_verifier(std::sync::Arc::new(UnverifiedTargetCertificate(provider)))
+                .with_no_client_auth();
+            tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+        })
+        .clone()
+}
+
+/// Accepts any target certificate, as a load balancer does, while still checking that the
+/// handshake was signed by the key the certificate carries.
+#[derive(Debug)]
+struct UnverifiedTargetCertificate(std::sync::Arc<::rustls::crypto::CryptoProvider>);
+
+impl ::rustls::client::danger::ServerCertVerifier for UnverifiedTargetCertificate {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &::rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: ::rustls::pki_types::UnixTime,
+    ) -> Result<::rustls::client::danger::ServerCertVerified, ::rustls::Error> {
+        Ok(::rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &::rustls::pki_types::CertificateDer<'_>,
+        dss: &::rustls::DigitallySignedStruct,
+    ) -> Result<::rustls::client::danger::HandshakeSignatureValid, ::rustls::Error> {
+        ::rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &::rustls::pki_types::CertificateDer<'_>,
+        dss: &::rustls::DigitallySignedStruct,
+    ) -> Result<::rustls::client::danger::HandshakeSignatureValid, ::rustls::Error> {
+        ::rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<::rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
 async fn exchange(
     address: &str,
+    transport: Transport,
     proxied: &Proxied,
     request: &DataPlaneRequest,
     body: &[u8],
 ) -> Result<Served, Failure> {
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((address, proxied.port)))
-        .await
-        .map_err(|_| Failure::TimedOut)?
-        .map_err(|error| Failure::Unreachable(format!("connect: {error}")))?;
+    let stream = connect(address, proxied.port, transport).await?;
     let outgoing = outgoing_request(proxied, request, body)?;
     let answer = tokio::time::timeout(RESPONSE_TIMEOUT, async move {
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
@@ -276,6 +408,9 @@ mod tests {
             listener_protocol: Some("HTTP".to_string()),
             listener_port: Some(80),
             target_group_arn: "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/t/1".to_string(),
+            guarding_group_ids: Vec::new(),
+            source_group_ids: Vec::new(),
+            source_interface_ids: Vec::new(),
             set_cookie: None,
         }
     }
@@ -300,6 +435,13 @@ mod tests {
         assert!(headers.contains(&("accept".to_string(), "text/html".to_string())));
         assert!(!headers.iter().any(|(name, _)| name == "connection" || name == "transfer-encoding"));
         assert_eq!(headers.iter().filter(|(name, _)| name == "host").count(), 1);
+    }
+
+    #[test]
+    fn http_and_https_are_the_protocols_dialled() {
+        assert_eq!(Transport::of("HTTP"), Some(Transport::Http));
+        assert_eq!(Transport::of("https"), Some(Transport::Https));
+        assert_eq!(Transport::of("TCP"), None);
     }
 
     #[test]
