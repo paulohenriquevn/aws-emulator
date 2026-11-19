@@ -155,6 +155,9 @@ jobs:
       - name: EC2 instance state changes reach EventBridge
         run: cargo test -p aws-emulator-fork-router --test ec2_instance_state_events
 
+      - name: An EKS managed node group runs EC2 instances
+        run: cargo test -p aws-emulator-fork-router --test eks_nodegroup_instances
+
       - name: Workload identity for a cluster outside the emulator
         run: >-
           cargo test

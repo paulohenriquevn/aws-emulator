@@ -4584,6 +4584,7 @@ mod eks_anywhere_subscriptions;
 mod nodegroups;
 mod pass_role;
 mod peers;
+pub mod nodegroup_instances;
 mod store;
 pub use addon_catalog::*;
 pub use certificate_authority::*;

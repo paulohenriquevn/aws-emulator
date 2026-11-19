@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `EMULATOR_IAM_ENFORCE=on` judges every signed call to every service against the caller's identity-based policies at the action level, and `fork/kubernetes/run.sh` runs with it on, each role holding the policy its controller documents (#7)
 - `EMULATOR_ELASTICACHE_BACKEND=docker` serves a Valkey or Redis OSS replication group (cluster mode disabled) or cache cluster with a real server of its engine and major version in a container, behind the endpoints the group publishes, with `AuthToken` as the server's password and TLS with the emulator's certificate under `TransitEncryptionEnabled` (#8)
 - The `data` acceptance fixture writes a value to its Valkey group over TLS and reads it back (#8)
+- `CreateNodegroup` launches the node group's `desiredSize` EC2 instances of the Amazon EKS optimized AMI, spread over its subnets and tagged `eks:cluster-name` and `eks:nodegroup-name`, and `DeleteNodegroup` terminates them (#9)
+- `fork/kubernetes/run.sh` creates a managed node group and runs one kind worker per instance, with the instance's providerID, and checks the ALB targets all of them (#9)
 - `fork/kubernetes/run.sh` runs kind on a Docker network that is also the EKS cluster's VPC, gives the node container the node instance's private address, and sends a request through the ALB the AWS Load Balancer Controller creates and checks the echo pod answers it (#4)
 
 ### Fixed
