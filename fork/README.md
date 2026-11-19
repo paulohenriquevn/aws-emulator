@@ -112,9 +112,11 @@ whose `Host` is that name.
 The ALB passes that request on to its target (`target_proxy.rs`, below). For the target to be
 reachable, the kind node runs on a Docker network of its own (`aws-emulator-kind`,
 `172.29.0.0/16`, override with `KIND_NETWORK` and `KIND_NETWORK_CIDR`) that is also the EKS
-cluster's VPC, and the node's EC2 instance is launched at the node container's own address. kind
-gives the node an address of `172.29.1.0/24`, away from the addresses EC2 reserves in the subnet,
-and the node gets its `providerID` once the instance exists.
+cluster's VPC. The node's EC2 instance is launched at `172.29.100.10` before kind starts, so
+kubelet registers the node with that instance as its `providerID` (the API server lets a
+`providerID` be set only from empty, and kind sets one of its own otherwise). That address is then
+added to the node container's interface. Docker hands out addresses of `172.29.1.0/24` only, so
+it never gives the instance's address to a container.
 
 It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git, and network
 access for images and charts. The emulator listens on the gateway of kind's Docker network
