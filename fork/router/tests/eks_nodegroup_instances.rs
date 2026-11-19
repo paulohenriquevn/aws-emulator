@@ -121,13 +121,14 @@ async fn nodes_in(router: &MultiServiceRouter, nodegroup: &str, states: &str) ->
     )
     .await;
     // Each instance's own `subnetId` is the first one after its `instanceId` (its network
-    // interfaces repeat it further on).
+    // interfaces repeat it further on). A terminated instance reports none: its interface
+    // went with the termination, so its subnet is empty here.
     described
         .split("<instanceId>")
         .skip(1)
         .filter_map(|rest| {
             let (id, after) = rest.split_once("</instanceId>")?;
-            let subnet = elements(after, "subnetId").into_iter().next()?;
+            let subnet = elements(after, "subnetId").into_iter().next().unwrap_or_default();
             Some((id.to_string(), subnet))
         })
         .collect::<std::collections::BTreeMap<_, _>>()
