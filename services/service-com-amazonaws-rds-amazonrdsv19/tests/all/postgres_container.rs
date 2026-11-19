@@ -561,9 +561,16 @@ async fn a_connection_the_security_groups_do_not_admit_is_closed_before_the_hand
     let _serial = container_backend();
     let engine = Arc::new(engine::InMemoryEngine::new());
     let router = emulator_on(Arc::clone(&engine));
-    let (port, _) = available_instance_with(&router, "pg-guarded", "16", &[("VpcSecurityGroupIds.VpcSecurityGroupId.1", DATABASE_GROUP)]).await;
-    // The rule names another port, so nothing admits the client.
-    guard_database(&engine, i32::from(port) + 1);
+    // The rules are read for the instance's `Port`, which the listener prefers but may not
+    // get; the rule here names another port, so nothing admits the client.
+    let (port, _) = available_instance_with(
+        &router,
+        "pg-guarded",
+        "16",
+        &[("Port", "5441"), ("VpcSecurityGroupIds.VpcSecurityGroupId.1", DATABASE_GROUP)],
+    )
+    .await;
+    guard_database(&engine, 5442);
 
     let answer = ssl_answer(port).await;
 
@@ -577,8 +584,15 @@ async fn a_connection_the_security_groups_admit_reaches_the_server() {
     let _serial = container_backend();
     let engine = Arc::new(engine::InMemoryEngine::new());
     let router = emulator_on(Arc::clone(&engine));
-    let (port, _) = available_instance_with(&router, "pg-admitted", "16", &[("VpcSecurityGroupIds.VpcSecurityGroupId.1", DATABASE_GROUP)]).await;
-    guard_database(&engine, i32::from(port));
+    // The rule names the instance's `Port`, whatever port the listener got.
+    let (port, _) = available_instance_with(
+        &router,
+        "pg-admitted",
+        "16",
+        &[("Port", "5443"), ("VpcSecurityGroupIds.VpcSecurityGroupId.1", DATABASE_GROUP)],
+    )
+    .await;
+    guard_database(&engine, 5443);
 
     let answer = ssl_answer(port).await;
 
