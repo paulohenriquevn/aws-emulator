@@ -190,43 +190,76 @@ impl PostgresContainer {
         waited.unwrap_or_else(|_| Err(format!("container {} was not ready within {READY_TIMEOUT:?}", self.name)))
     }
 
-    /// Change the master user's password in the running server, as `ModifyDBInstance`
-    /// with `MasterUserPassword` does. The password travels on the standard input of
-    /// `psql` as a variable, never on a command line.
-    pub async fn set_master_password(&self, username: &str, password: &str) -> Result<(), String> {
-        self.ready().await?;
-        let mut child = Command::new("docker")
-            .args(["exec", "-i", &self.name, "psql", "-v", "ON_ERROR_STOP=1", "-q", "-U", username, "-d", "postgres"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("docker exec could not be started: {error}"))?;
-        let script = format!(
-            "\\set user {}\n\\set password {}\nALTER USER :\"user\" PASSWORD :'password';\n",
-            psql_literal(username),
-            psql_literal(password)
-        );
-        let mut stdin = child.stdin.take().ok_or("docker exec has no standard input")?;
-        stdin
-            .write_all(script.as_bytes())
-            .await
-            .map_err(|error| format!("writing to psql: {error}"))?;
-        drop(stdin);
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|error| format!("waiting for psql: {error}"))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "psql in {} exited with {}: {}",
-                self.name,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
+    /// Change the master user's password in the server, as `ModifyDBInstance` with
+    /// `MasterUserPassword` does, without awaiting anything (the caller holds the store's
+    /// guard in scope). A server that already runs is changed before this returns, so the
+    /// next session logs in with the new password; one still starting is changed by a task
+    /// once it is ready. A failure is logged as an error naming the container.
+    pub fn change_master_password(self: &Arc<Self>, username: String, password: String) {
+        let ready = matches!(&*self.state.borrow(), ContainerState::Ready(_));
+        if ready {
+            log_password_outcome(&self.name, run_password_change(&self.name, &username, &password));
+            return;
         }
+        let container = Arc::clone(self);
+        tokio::spawn(async move {
+            let outcome = match container.ready().await {
+                Ok(_) => {
+                    let name = container.name.clone();
+                    tokio::task::spawn_blocking(move || run_password_change(&name, &username, &password))
+                        .await
+                        .unwrap_or_else(|error| Err(format!("the password change task failed: {error}")))
+                }
+                Err(reason) => Err(reason),
+            };
+            log_password_outcome(&container.name, outcome);
+        });
+    }
+}
+
+fn log_password_outcome(name: &str, outcome: Result<(), String>) {
+    if let Err(reason) = outcome {
+        tracing::error!(
+            container = %name,
+            %reason,
+            "the master password of the PostgreSQL container was not changed, so the old \
+             password still opens a session on it"
+        );
+    }
+}
+
+/// `ALTER USER` in the container `name`, through `psql`. The password travels on the
+/// standard input of `psql` as a variable, never on a command line.
+fn run_password_change(name: &str, username: &str, password: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("docker")
+        .args(["exec", "-i", name, "psql", "-v", "ON_ERROR_STOP=1", "-q", "-U", username, "-d", "postgres"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("docker exec could not be started: {error}"))?;
+    let script = format!(
+        "\\set user {}\n\\set password {}\nALTER USER :\"user\" PASSWORD :'password';\n",
+        psql_literal(username),
+        psql_literal(password)
+    );
+    let mut stdin = child.stdin.take().ok_or("docker exec has no standard input")?;
+    stdin
+        .write_all(script.as_bytes())
+        .map_err(|error| format!("writing to psql: {error}"))?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("waiting for psql: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "psql in {name} exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 

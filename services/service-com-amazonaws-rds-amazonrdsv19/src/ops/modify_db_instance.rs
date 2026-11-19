@@ -1020,7 +1020,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // fork: an instance served by a PostgreSQL container changes the password in that
         // server too, with the store's guard released. The modification is already
         // accepted, as RDS applies it after answering, so a failure is logged as an error
-        // naming the container rather than reported to the caller.
+        // naming the container rather than reported to the caller. Nothing is awaited here:
+        // the store's guard would be held across the await.
         let new_password = rotated_master_user_password
             .clone()
             .or_else(|| input.master_user_password.clone());
@@ -1033,14 +1034,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let (Some(container), Some(password), Some(username)) =
             (container, new_password, container_username)
         {
-            if let Err(reason) = container.set_master_password(&username, &password).await {
-                tracing::error!(
-                    container = %container.name(),
-                    %reason,
-                    "the master password of the PostgreSQL container was not changed, so the \
-                     old password still opens a session on it"
-                );
-            }
+            container.change_master_password(username, password);
         }
 
         Ok(ModifyDBInstanceOutput {
