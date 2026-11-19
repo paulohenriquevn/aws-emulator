@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - The `data` acceptance fixture writes a value to its Valkey group over TLS and reads it back (#8)
 - `CreateNodegroup` launches the node group's `desiredSize` EC2 instances of the Amazon EKS optimized AMI, spread over its subnets and tagged `eks:cluster-name` and `eks:nodegroup-name`, and `DeleteNodegroup` terminates them (#9)
 - `fork/kubernetes/run.sh` creates a managed node group and runs one kind worker per instance, with the instance's providerID, and checks the ALB targets all of them (#9)
+- A container-backed RDS for PostgreSQL or ElastiCache endpoint closes a connection the DB instance's or the cache's VPC security groups do not admit before reading from it, when the source address is held by a network interface of the account; a source no network interface holds is let through (#11)
 - `fork/kubernetes/run.sh` runs kind on a Docker network that is also the EKS cluster's VPC, gives the node container the node instance's private address, and sends a request through the ALB the AWS Load Balancer Controller creates and checks the echo pod answers it (#4)
 
 ### Fixed

@@ -650,6 +650,7 @@ pub async fn open_postgres_container_endpoint<Eng: Send + Sync + 'static>(
     let proxy = postgres_container::PostgresContainerProxy {
         container: Arc::clone(&container),
         context,
+        firewall: ::service_com_amazonaws_ec2_amazonec2::state::service_state(engine),
     };
     let listener = match preferred_port {
         Some(port) => listeners.tcp_plaintext_preferring(proxy, port).await,

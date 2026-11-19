@@ -404,14 +404,55 @@ pub struct PostgresContainerProxy {
     /// What the in-process engine admits a session against: the store, the instance, the
     /// core's TLS server and the run a reboot or a stop bumps.
     pub(super) context: super::wire_session::SessionContext,
+    /// The account's EC2 store, whose security groups decide which sources may connect
+    /// (`service_com_amazonaws_ec2_amazonec2::state::connection_firewall`). `None` when the
+    /// engine holds no EC2.
+    pub(super) firewall: Option<::engine::ServiceState<::service_com_amazonaws_ec2_amazonec2::state::ComAmazonawsEc2Amazonec2State>>,
+}
+
+/// Whether the DB instance's VPC security groups refuse a connection from `peer`: only a
+/// verdict of the groups refuses, and an undecided question (a source no network interface
+/// of the account holds, a group EC2 does not hold) lets the connection through.
+fn refused_by_security_groups(
+    context: &super::wire_session::SessionContext,
+    firewall: Option<&::engine::ServiceState<::service_com_amazonaws_ec2_amazonec2::state::ComAmazonawsEc2Amazonec2State>>,
+    peer: Option<SocketAddr>,
+) -> bool {
+    let (Some(firewall), Some(peer)) = (firewall, peer) else {
+        return false;
+    };
+    let super::wire_session::SessionTarget::DbInstance { region, resource_id } = &context.target else {
+        return false;
+    };
+    let guarded = {
+        let store = context.state.lock();
+        store
+            .instance_by_resource_id(region, resource_id)
+            .map(|record| (record.vpc_security_group_ids.clone(), record.endpoint_port))
+    };
+    let Some((groups, port)) = guarded else {
+        return false;
+    };
+    let store = firewall.lock();
+    ::service_com_amazonaws_ec2_amazonec2::state::connection_firewall::store_admits_connection(&store, &groups, peer.ip(), port)
+        == Some(false)
 }
 
 impl ::emulator_server::NativeHandler for PostgresContainerProxy {
     fn serve(&self, conn: ::emulator_server::ListenerConn) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let container = Arc::clone(&self.container);
         let context = self.context.clone();
+        let firewall = self.firewall.clone();
         Box::pin(async move {
             let name = container.name().to_string();
+            // fork: a connection the instance's security groups do not admit is closed before
+            // anything is read from it, as a dropped SYN never reaches the server on AWS.
+            let peer = ::emulator_server::connection_peer();
+            if refused_by_security_groups(&context, firewall.as_ref(), peer) {
+                tracing::warn!(container = %name, ?peer, "the DB instance's security groups do not admit this connection");
+                drop(conn);
+                return;
+            }
             if let Err(error) = proxy_session(context, container, conn).await {
                 tracing::debug!(container = %name, %error, "a proxied PostgreSQL session ended with an error");
             }

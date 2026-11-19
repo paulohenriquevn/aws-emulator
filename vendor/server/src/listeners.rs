@@ -151,6 +151,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> ListenerStream for T {}
 /// Boxed connection type passed to [`NativeHandler::serve`].
 pub type ListenerConn = Box<dyn ListenerStream>;
 
+tokio::task_local! {
+    /// fork: the address a native connection comes from, set around [`NativeHandler::serve`].
+    static CONNECTION_PEER: std::net::SocketAddr;
+}
+
+/// fork: the address the connection being served comes from, read inside the future
+/// [`NativeHandler::serve`] returns (not in a task that future spawns). `None` outside one.
+#[must_use]
+pub fn connection_peer() -> Option<std::net::SocketAddr> {
+    CONNECTION_PEER.try_with(|peer| *peer).ok()
+}
+
 /// Agent-written handler for a native-protocol (`tcp`) listener. One call per
 /// accepted, TLS-terminated connection. The handler owns the protocol and its
 /// authentication; the core owns only the socket, TLS, and the connection's
@@ -372,7 +384,7 @@ async fn serve_native<H: NativeHandler>(
                     _ = cancelled(loop_rx.clone()) => break,
                     r = listener.accept() => r,
                 };
-                let (stream, _peer) = match accepted {
+                let (stream, peer) = match accepted {
                     Ok(x) => x,
                     // Transient accept error (e.g. EMFILE): back off so we don't
                     // busy-spin at 100% CPU on a persistent failure.
@@ -408,7 +420,7 @@ async fn serve_native<H: NativeHandler>(
                         let last = Arc::new(Mutex::new(Instant::now()));
                         let guarded = ActivityStream { inner: conn, last: Arc::clone(&last) };
                         tokio::select! {
-                            _ = handler.serve(Box::new(guarded)) => {}
+                            _ = CONNECTION_PEER.scope(peer, handler.serve(Box::new(guarded))) => {}
                             _ = idle_elapsed(last, idle) => {}
                         }
                     };

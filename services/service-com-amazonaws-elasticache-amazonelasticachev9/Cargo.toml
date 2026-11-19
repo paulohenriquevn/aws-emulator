@@ -57,6 +57,13 @@ aws-sdk-sns = { version = "1", default-features = false, features = ["rt-tokio",
 # LABEL, which is what the endpoint the EC2 call above is made at is built from.
 service-common = { path = "../common" }
 
+# fork: a container-backed endpoint reads the account's security groups and network
+# interfaces from EC2's store to admit or refuse a connection by its source address
+# (`src/state/redis_container.rs`). The upstream crate takes EC2 only in its tests, where
+# it is also mounted beside this one so a cache subnet group can be created in the subnets
+# the account has.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
+
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
@@ -68,11 +75,6 @@ tokio-rustls = "0.26"
 # The encryption suite mounts KMS beside ElastiCache on one engine, because
 # resolving the key a resource names is a call into it.
 service-com-amazonaws-kms-trentservice = { workspace = true }
-# The EC2 service, mounted beside this one in the test harness: that a cache
-# subnet group can be created in the subnets the account HAS can only be driven
-# end to end with the owner of subnets on the same engine. DEV-ONLY: this crate
-# depends on no other service's crate outside its tests.
-service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 # Amazon S3, mounted beside this one in the test harness: the object an export of a
 # serverless cache snapshot writes is read back through that service's OWN operations,
 # so what the export reports is what the owner of objects really holds.

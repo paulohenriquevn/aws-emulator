@@ -2486,6 +2486,8 @@ mod availability_zone_display;
 mod instances_and_filters;
 // fork: EC2 instance state-change events on EventBridge.
 pub mod instance_state_events;
+// fork: security groups applied to connections to RDS and ElastiCache endpoints.
+pub mod connection_firewall;
 mod vpcs_and_security_groups;
 mod store;
 /// The bundle-task store's identity and refusals: the prefix a bundle task id carries, the
