@@ -422,6 +422,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // fork: the client the node group's instances are launched through, built before the
+        // store's guard is taken (`crate::state::nodegroup_instances`).
+        let launcher = state::nodegroup_instances::node_launcher(ctx, &region);
         let mut guard = store.lock();
         guard.materialize_due_transitions(now);
 
@@ -820,6 +823,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let nodegroup = record.to_nodegroup();
+        if let Some(launcher) = launcher {
+            launcher.launch(state::nodegroup_instances::NodeSpec {
+                cluster_name: record.cluster_name.clone(),
+                nodegroup_name: record.nodegroup_name.clone(),
+                desired: record.scaling_config.desired_size.unwrap_or(0),
+                instance_type: record
+                    .instance_types
+                    .as_ref()
+                    .and_then(|types| types.first().cloned())
+                    .unwrap_or_else(|| DEFAULT_INSTANCE_TYPE.to_string()),
+                subnets: record.subnets.clone(),
+                ami_type: record.ami_type.clone(),
+                kubernetes_version: record.version.clone(),
+                launch_template: record.launch_template.clone(),
+            });
+        }
         guard.nodegroups.insert(nodegroup_key, record);
 
         Ok(CreateNodegroupOutput {

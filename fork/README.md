@@ -92,7 +92,8 @@ authentication on, the route takes only requests signed with the emulator's own 
 | `irsa` | A pod whose service account is annotated with a role is that role (`sts get-caller-identity`). |
 | `iam-enforced` | The IRSA probe's role allows only `sts:GetCallerIdentity`, and EC2 refuses its `DescribeVpcs` with `UnauthorizedOperation`. |
 | `pod-identity` | A pod whose service account has a pod identity association gets the role's credentials from the EKS Pod Identity Agent. |
-| `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with the kind node's instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target), the target healthy, and a request to the ALB's name answered by the echo pod's nginx. |
+| `node-group` | The EKS managed node group's instances are the kind workers: `kubectl get nodes` lists one worker per instance, each `providerID` naming its instance, and the workers are `Ready`. |
+| `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with every node group instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target), every target healthy, and a request to the ALB's name answered by the echo pod's nginx. |
 | `external-secrets` | External Secrets, on IRSA, copies a Secrets Manager secret into a Kubernetes Secret. |
 | `opencost` | OpenCost reports the node's hourly cost as the emulator's on-demand price for its instance type. |
 
@@ -119,6 +120,12 @@ kubelet registers the node with that instance as its `providerID` (the API serve
 `providerID` be set only from empty, and kind sets one of its own otherwise). That address is then
 added to the node container's interface. Docker hands out addresses of `172.29.1.0/24` only, so
 it never gives the instance's address to a container.
+
+The harness also creates a managed node group of two `t3.medium` nodes. `CreateNodegroup`
+launches the instances in EC2 (below), and each one becomes a kind worker the same way: its
+`providerID`, zone and `eks.amazonaws.com/nodegroup` label in `kind.yaml`, and its private address
+added to the worker container's interface. The control-plane node keeps the instance launched
+above.
 
 It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git, and network
 access for images and charts. The emulator listens on the gateway of kind's Docker network
@@ -233,6 +240,7 @@ upstream ships the fix.
 | Elastic Load Balancing v2 | An unsigned form `POST /` on the emulator's endpoint (STS `AssumeRoleWithWebIdentity`) is not claimed as load balancer traffic, so it no longer answers `500 AmbiguousService` beside an ALB with a rule for `/` | not reported yet |
 | STS | `GetCallerIdentity` reports EKS Pod Identity credentials as the associated role's session (`assumed-role/<role>/eks-...`) | not reported yet |
 | EKS Auth | `AssumeRoleForPodIdentity` serves an EKS cluster of the emulator whose tokens a registered external Kubernetes cluster signs | not reported yet |
+| EKS | `CreateNodegroup` launches `desiredSize` EC2 instances of the Amazon EKS optimized AL2023 AMI over the node group's subnets, tagged `eks:cluster-name` and `eks:nodegroup-name`, and `DeleteNodegroup` terminates them (`src/state/nodegroup_instances.rs`). No Auto Scaling group is created, and `UpdateNodegroupConfig` launches or terminates nothing | not reported yet |
 | Price List | EC2 instance products carry the `marketoption` attribute (`OnDemand`) | not reported yet |
 | EC2 | Each state an instance moves into is published on EventBridge as an `EC2 Instance State-change Notification`, including the states the clock moves it into | [aws/aws-emulator#549](https://github.com/aws/aws-emulator/issues/549) |
 

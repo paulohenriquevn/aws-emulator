@@ -12,10 +12,14 @@
 #      Pod Identity credentials on 169.254.170.23 from eks-auth:AssumeRoleForPodIdentity.
 #   4. Each check below must pass:
 #        irsa                  an annotated pod is the IRSA role (sts get-caller-identity)
+#        iam-enforced          EC2 refuses the IRSA probe, whose role allows only sts:GetCallerIdentity
 #        pod-identity          an associated pod gets the role's credentials from the agent
+#        node-group            the EKS managed node group's instances are the kind workers:
+#                              one worker per instance, its providerID naming it
 #        load-balancer         the AWS Load Balancer Controller (IRSA) turns an Ingress into
-#                              an ALB in the emulator, with the node registered as a target,
-#                              and a request to the ALB's name reaches the echo pod
+#                              an ALB in the emulator, with every node group instance a
+#                              healthy target, and a request to the ALB's name reaches the
+#                              echo pod
 #        external-secrets      External Secrets (IRSA) copies a Secrets Manager secret into
 #                              a Kubernetes Secret
 #        opencost              OpenCost prices the node from the emulator's EC2 price list
@@ -35,7 +39,7 @@ fi
 BIN=$(realpath "$BIN")
 shift
 CHECKS=("$@")
-[[ ${#CHECKS[@]} -gt 0 ]] || CHECKS=(irsa iam-enforced pod-identity load-balancer external-secrets opencost)
+[[ ${#CHECKS[@]} -gt 0 ]] || CHECKS=(irsa iam-enforced pod-identity node-group load-balancer external-secrets opencost)
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${KUBERNETES_WORK:-$(mktemp -d)}
@@ -46,6 +50,8 @@ REGION=us-east-1
 CLUSTER=operations
 KIND_CLUSTER=aws-emulator
 NODE_INSTANCE_TYPE=t3.medium
+NODEGROUP=workers
+NODEGROUP_SIZE=2
 # The kind node's Docker network IS the EKS cluster's VPC, so a load balancer target the
 # emulator dials is reachable from the host. The node instance is launched at
 # NODE_INSTANCE_IP before kind starts (kubelet takes its providerID at registration, and the
@@ -152,6 +158,27 @@ INSTANCE=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$NODE_INSTAN
   --private-ip-address "$NODE_INSTANCE_IP" --query 'Instances[0].InstanceId' --output text) || fail "launching the node instance at $NODE_INSTANCE_IP"
 say "EKS cluster $CLUSTER, issuer $ISSUER, VPC $VPC, node instance $INSTANCE at $NODE_INSTANCE_IP"
 
+# The managed node group: EKS launches its instances in EC2, and each becomes a kind worker
+# with the instance's providerID, zone and private address, as the control-plane node is for
+# the instance above.
+NODE_ROLE=$(aws iam create-role --role-name "$CLUSTER-nodes" --assume-role-policy-document "$(trust ec2.amazonaws.com)" --query Role.Arn --output text)
+aws eks create-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NODEGROUP" --node-role "$NODE_ROLE" \
+  --subnets "${SUBNETS[@]}" --instance-types "$NODE_INSTANCE_TYPE" \
+  --scaling-config "minSize=1,maxSize=$NODEGROUP_SIZE,desiredSize=$NODEGROUP_SIZE" >>"$LOG"
+nodegroup_instances() {
+  aws ec2 describe-instances \
+    --filters "Name=tag:eks:cluster-name,Values=$CLUSTER" "Name=tag:eks:nodegroup-name,Values=$NODEGROUP" "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[].[InstanceId,PrivateIpAddress,Placement.AvailabilityZone]' --output text | sort
+}
+WORKERS=()
+for _ in $(seq 60); do
+  mapfile -t WORKERS < <(nodegroup_instances)
+  [[ ${#WORKERS[@]} -eq $NODEGROUP_SIZE ]] && break
+  sleep 1
+done
+[[ ${#WORKERS[@]} -eq $NODEGROUP_SIZE ]] || fail "node group $NODEGROUP has ${#WORKERS[@]} running instances, $NODEGROUP_SIZE wanted"
+say "node group $NODEGROUP: ${WORKERS[*]}"
+
 cat >"$WORK/kind.yaml" <<EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -178,6 +205,26 @@ nodes:
   - hostPath: $WORK/price-list
     containerPath: /price-list
 EOF
+for worker in "${WORKERS[@]}"; do
+  read -r id _ zone <<<"$worker"
+  cat >>"$WORK/kind.yaml" <<EOF
+- role: worker
+  labels:
+    node.kubernetes.io/instance-type: $NODE_INSTANCE_TYPE
+    topology.kubernetes.io/region: $REGION
+    topology.kubernetes.io/zone: $zone
+    eks.amazonaws.com/nodegroup: $NODEGROUP
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        provider-id: aws:///$zone/$id
+  extraMounts:
+  - hostPath: $WORK/price-list
+    containerPath: /price-list
+EOF
+done
 mkdir -p "$WORK/price-list"
 kind delete cluster --name "$KIND_CLUSTER" >>"$LOG" 2>&1 || true
 kind create cluster --name "$KIND_CLUSTER" --config "$WORK/kind.yaml" --kubeconfig "$KUBECONFIG" --wait 120s >>"$LOG" 2>&1 || fail "kind create cluster; see $LOG"
@@ -187,6 +234,13 @@ kind create cluster --name "$KIND_CLUSTER" --config "$WORK/kind.yaml" --kubeconf
 NODE=$KIND_CLUSTER-control-plane
 docker exec "$NODE" ip addr add "$NODE_INSTANCE_IP/32" dev eth0 >>"$LOG" 2>&1 || fail "adding $NODE_INSTANCE_IP to the kind node"
 say "node $NODE answers at $NODE_INSTANCE_IP for instance $INSTANCE"
+# kind names its workers <cluster>-worker, <cluster>-worker2, ... in the order of kind.yaml.
+for index in "${!WORKERS[@]}"; do
+  read -r id address _ <<<"${WORKERS[$index]}"
+  worker=$KIND_CLUSTER-worker$( ((index == 0)) || echo $((index + 1)) )
+  docker exec "$worker" ip addr add "$address/32" dev eth0 >>"$LOG" 2>&1 || fail "adding $address to the kind worker $worker"
+  say "worker $worker answers at $address for instance $id"
+done
 
 # kind's API server now signs as the EKS cluster's issuer: register its key set for it.
 kubectl get --raw /openid/v1/jwks >"$WORK/jwks.json"
@@ -316,6 +370,15 @@ check_pod_identity() {
   [[ $answer == "arn:aws:sts::$ACCOUNT:assumed-role/pod-identity-probe/"* ]] || { diagnose pod-identity probes kube-system; return 1; }
 }
 
+check_node_group() {
+  local wanted listed
+  wanted=$(for worker in "${WORKERS[@]}"; do read -r id _ zone <<<"$worker"; echo "aws:///$zone/$id"; done | sort)
+  listed=$(kubectl get nodes -l "eks.amazonaws.com/nodegroup=$NODEGROUP" -o jsonpath='{range .items[*]}{.spec.providerID}{"\n"}{end}' | sort)
+  say "node-group: kubectl lists [$(echo $listed)], the node group's instances are [$(echo $wanted)]"
+  [[ -n $wanted && $listed == "$wanted" ]] || { kubectl get nodes -o wide >>"$LOG" 2>&1; return 1; }
+  kubectl wait --for=condition=Ready node -l "eks.amazonaws.com/nodegroup=$NODEGROUP" --timeout 120s >>"$LOG" 2>&1 || { say "node-group: a worker is not Ready"; return 1; }
+}
+
 check_load_balancer() {
   helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller --version "$LBC_CHART_VERSION" -n kube-system \
     --set clusterName="$CLUSTER" --set region="$REGION" --set vpcId="$VPC" \
@@ -337,21 +400,27 @@ check_load_balancer() {
   group=$(aws elbv2 describe-target-groups --load-balancer-arn "$balancer" --query 'TargetGroups[0].TargetGroupArn' --output text)
   # Instance targets: the kind node is the EC2 instance its providerID names, and the
   # Service's NodePort is the port the target group forwards to.
+  # Every node group instance has to be a target, beside the control-plane node's instance.
+  local wanted=() worker id missing
+  for worker in "${WORKERS[@]}"; do read -r id _ <<<"$worker"; wanted+=("$id"); done
   for _ in $(seq 60); do
     targets=$(aws elbv2 describe-target-health --target-group-arn "$group" --query 'TargetHealthDescriptions[].Target.Id' --output text)
-    [[ " $targets " == *" $INSTANCE "* ]] && break
+    missing=
+    for id in "${wanted[@]}"; do [[ " $targets " == *" $id "* ]] || missing+=" $id"; done
+    [[ -z $missing ]] && break
     sleep 1
   done
-  say "load-balancer: $balancer targets [$targets], node instance $INSTANCE"
-  [[ " $targets " == *" $INSTANCE "* ]] || { diagnose load-balancer kube-system probes; return 1; }
-  local health=
+  say "load-balancer: $balancer targets [$targets], node group instances [${wanted[*]}]"
+  [[ -z $missing ]] || { say "load-balancer: not targets:$missing"; diagnose load-balancer kube-system probes; return 1; }
+  local unhealthy=
   for _ in $(seq 120); do
-    health=$(aws elbv2 describe-target-health --target-group-arn "$group" --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
-    [[ $health == healthy ]] && break
+    unhealthy=$(aws elbv2 describe-target-health --target-group-arn "$group" \
+      --query "TargetHealthDescriptions[?TargetHealth.State!='healthy'].[Target.Id,TargetHealth.State]" --output text)
+    [[ -z $unhealthy ]] && break
     sleep 1
   done
-  say "load-balancer: target health $health"
-  [[ $health == healthy ]] || { diagnose load-balancer kube-system probes; return 1; }
+  say "load-balancer: targets not healthy: [${unhealthy:-none}]"
+  [[ -z $unhealthy ]] || { diagnose load-balancer kube-system probes; return 1; }
   # Real traffic: a request to the ALB's name, at the emulator's endpoint, is passed on to
   # the node's NodePort and answered by the echo pod's nginx.
   local page=
