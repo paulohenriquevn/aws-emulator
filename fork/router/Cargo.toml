@@ -14,6 +14,7 @@ path = "src/main.rs"
 aws-emulator-fork-console = { workspace = true }
 aws-emulator-fork-service-account-issuers = { workspace = true }
 aws-emulator-fork-access-log = { workspace = true }
+aws-emulator-fork-iam-gate = { workspace = true }
 engine = { workspace = true }
 emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }

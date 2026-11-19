@@ -35,7 +35,7 @@ fi
 BIN=$(realpath "$BIN")
 shift
 CHECKS=("$@")
-[[ ${#CHECKS[@]} -gt 0 ]] || CHECKS=(irsa pod-identity load-balancer external-secrets opencost)
+[[ ${#CHECKS[@]} -gt 0 ]] || CHECKS=(irsa iam-enforced pod-identity load-balancer external-secrets opencost)
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${KUBERNETES_WORK:-$(mktemp -d)}
@@ -117,7 +117,9 @@ mkdir -p "$EMU_HOME"
 # The access log (fork/access-log) records every call the controllers make. Without
 # listener sockets an ALB publishes an elb.amazonaws.com name, which an Ingress status
 # accepts as a hostname; a socket's host:port is refused there.
-RUST_LOG=${EMULATOR_LOG:-info,access=debug} EMULATOR_ELB_LISTENER_SOCKETS=off EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
+# EMULATOR_IAM_ENFORCE=on: every call a pod makes is judged against its role's policies
+# (fork/iam-gate), so each role below carries the policy its controller documents.
+RUST_LOG=${EMULATOR_LOG:-info,access=debug} EMULATOR_IAM_ENFORCE=${EMULATOR_IAM_ENFORCE:-on} EMULATOR_ELB_LISTENER_SOCKETS=off EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
 EMU_PID=$!
 EMU_DIR=$EMU_HOME/.aws/emulator/$PORT
 CA=$EMU_DIR/ca.pem
@@ -203,21 +205,28 @@ done
 PROVIDER=${ISSUER#https://}
 aws iam create-open-id-connect-provider --url "$ISSUER" --client-id-list sts.amazonaws.com \
   --thumbprint-list 9e99a48a9960b14926bb7f3b02e22da2b0ab7280 >>"$LOG"
-everything='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'
+# The probes only ask who they are; sts:GetCallerIdentity needs no permission on AWS.
+probe_policy='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}'
+# The AWS Load Balancer Controller's own policy, for the controller version the chart runs.
+LBC_APP_VERSION=$(helm show chart eks/aws-load-balancer-controller --version "$LBC_CHART_VERSION" | awk '/^appVersion:/ {print $2}')
+curl -sfL "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/$LBC_APP_VERSION/docs/install/iam_policy.json" \
+  -o "$WORK/lbc-policy.json" || fail "could not fetch the AWS Load Balancer Controller $LBC_APP_VERSION IAM policy"
+# What External Secrets documents for reading Secrets Manager.
+eso_policy='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetResourcePolicy","secretsmanager:GetSecretValue","secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"*"}]}'
 irsa_role() {
-  local name=$1 namespace=$2 account=$3 document
+  local name=$1 namespace=$2 account=$3 policy=$4 document
   document=$(jq -cn --arg provider "$PROVIDER" --arg federated "arn:aws:iam::$ACCOUNT:oidc-provider/$PROVIDER" \
     --arg subject "system:serviceaccount:$namespace:$account" \
     '{Version:"2012-10-17",Statement:[{Effect:"Allow",Principal:{Federated:$federated},Action:"sts:AssumeRoleWithWebIdentity",
       Condition:{StringEquals:{($provider+":sub"):$subject,($provider+":aud"):"sts.amazonaws.com"}}}]}')
   aws iam create-role --role-name "$name" --assume-role-policy-document "$document" --query Role.Arn --output text
-  aws iam put-role-policy --role-name "$name" --policy-name everything --policy-document "$everything"
+  aws iam put-role-policy --role-name "$name" --policy-name "$name" --policy-document "$policy"
 }
-IRSA_PROBE_ROLE=$(irsa_role irsa-probe probes irsa-probe)
-LBC_ROLE=$(irsa_role load-balancer-controller kube-system aws-load-balancer-controller)
-ESO_ROLE=$(irsa_role external-secrets external-secrets external-secrets)
+IRSA_PROBE_ROLE=$(irsa_role irsa-probe probes irsa-probe "$probe_policy")
+LBC_ROLE=$(irsa_role load-balancer-controller kube-system aws-load-balancer-controller "$(jq -c . "$WORK/lbc-policy.json")")
+ESO_ROLE=$(irsa_role external-secrets external-secrets external-secrets "$eso_policy")
 POD_IDENTITY_ROLE=$(aws iam create-role --role-name pod-identity-probe --assume-role-policy-document "$(trust pods.eks.amazonaws.com)" --query Role.Arn --output text)
-aws iam put-role-policy --role-name pod-identity-probe --policy-name everything --policy-document "$everything"
+aws iam put-role-policy --role-name pod-identity-probe --policy-name pod-identity-probe --policy-document "$probe_policy"
 aws eks create-pod-identity-association --cluster-name "$CLUSTER" --namespace probes --service-account pod-identity-probe --role-arn "$POD_IDENTITY_ROLE" >>"$LOG"
 
 # --- 4. The webhook and the EKS Pod Identity Agent ----------------------------------------
@@ -287,6 +296,16 @@ check_irsa() {
   answer=$(probe irsa-probe sts get-caller-identity --query Arn --output text)
   say "irsa: $answer"
   [[ $answer == "arn:aws:sts::$ACCOUNT:assumed-role/irsa-probe/"* ]] || { diagnose irsa probes kube-system; return 1; }
+}
+
+# A role is held to its policy: the IRSA probe may ask who it is, and EC2 refuses it.
+check_iam_enforced() {
+  kubectl -n probes create serviceaccount irsa-probe --dry-run=client -o yaml | kubectl apply -f - >>"$LOG"
+  kubectl -n probes annotate serviceaccount irsa-probe --overwrite "eks.amazonaws.com/role-arn=$IRSA_PROBE_ROLE" >>"$LOG"
+  local answer
+  answer=$(probe irsa-probe ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text)
+  say "iam-enforced: $answer"
+  [[ $answer == *UnauthorizedOperation* ]] || { diagnose iam-enforced probes; return 1; }
 }
 
 check_pod_identity() {
