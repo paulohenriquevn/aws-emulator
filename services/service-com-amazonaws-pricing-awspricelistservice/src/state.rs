@@ -2376,6 +2376,9 @@ fn ec2_products() -> Vec<Product> {
                         ("licenseModel", plan.license_model.to_string()),
                         ("location", region.location.to_string()),
                         ("locationType", AWS_REGION_LOCATION_TYPE.to_string()),
+                        // fork: AWS publishes the market option on every compute
+                        // instance product; OpenCost prices nodes only from `OnDemand`.
+                        ("marketoption", "OnDemand".to_string()),
                         ("memory", instance.memory.to_string()),
                         (
                             "normalizationSizeFactor",

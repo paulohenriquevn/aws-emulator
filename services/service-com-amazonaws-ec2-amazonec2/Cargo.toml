@@ -16,7 +16,8 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+# fork: the instance state event clock sleeps until a transition falls due.
+tokio = { workspace = true, features = ["time"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -66,6 +67,8 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # carrying a fractional part where Rust's own rendering drops it, and the ONE
 # evaluation of IAM policy documents the authorization gate decides a request with.
 service-common = { path = "../common" }
+# fork: EC2 instance state-change events go out through the in-process EventBridge client.
+aws-sdk-eventbridge = { version = "1", default-features = false }
 # The EBS DIRECT APIs and EC2 describe ONE snapshot resource: a snapshot `ebs:StartSnapshot`
 # minted is read back through `ec2:DescribeSnapshots`, so this service reads THAT service's
 # own state accessor rather than keeping a second copy of its snapshots.

@@ -279,7 +279,15 @@ impl<'a> Addressed<'a> {
                         .get("authorization")
                         .and_then(|value| value.to_str().ok()),
                 )
-                || presigned(parts.uri.query()),
+                || presigned(parts.uri.query())
+                || query_protocol_call(
+                    parts.method.as_str(),
+                    parts.uri.path(),
+                    parts
+                        .headers
+                        .get(http::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok()),
+                ),
         }
     }
 
@@ -296,7 +304,12 @@ impl<'a> Addressed<'a> {
                 .iter()
                 .any(|name| req.headers().get(*name).is_some())
                 || sigv4_signed(req.headers().get("authorization"))
-                || presigned(uri.query()),
+                || presigned(uri.query())
+                || query_protocol_call(
+                    req.method(),
+                    uri.path(),
+                    req.headers().get("content-type"),
+                ),
         }
     }
 }
@@ -314,6 +327,26 @@ fn sigv4_signed(authorization: Option<&str>) -> bool {
 
 /// Whether a query string carries the SigV4 scope a PRESIGNED request puts there instead
 /// of in a header, which is an AWS API call however little else it presents.
+/// fork: whether a request has the shape of an awsQuery or ec2Query API call: a form
+/// `POST /`. Every query-protocol service is called that way, and some of their operations
+/// are sent with no signature at all (STS `AssumeRoleWithWebIdentity` and
+/// `AssumeRoleWithSAML`), so the shape is what tells such a call apart from a load
+/// balancer's traffic on the emulator's own endpoint. A client that posts a form to a load
+/// balancer's root names that load balancer by host, prefix or first segment instead.
+fn query_protocol_call(method: &str, path: &str, content_type: Option<&str>) -> bool {
+    method.eq_ignore_ascii_case("POST")
+        && path == "/"
+        && content_type.is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|media| media.trim().eq_ignore_ascii_case(FORM_CONTENT_TYPE))
+        })
+}
+
+/// The media type of an awsQuery or ec2Query request body.
+const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+
 fn presigned(query: Option<&str>) -> bool {
     let Some(query) = query else {
         return false;

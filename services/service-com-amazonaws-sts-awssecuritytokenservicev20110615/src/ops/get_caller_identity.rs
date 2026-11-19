@@ -159,6 +159,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let access_key_id = ::service_common::request_access_key_id(ctx.parts());
+        // fork: credentials another service issued for a role session (EKS Auth's
+        // `AssumeRoleForPodIdentity`) are that role's session, as AWS reports them.
+        let issued_elsewhere = (&*self.engine as &dyn ::std::any::Any)
+            .downcast_ref::<::engine::InMemoryEngine>()
+            .and_then(|engine| {
+                engine
+                    .state::<::service_common::assumed_role_sessions::AssumedRoleSessions>()
+                    .lock()
+                    .session(&access_key_id)
+                    .cloned()
+            });
+        if let Some(session) = issued_elsewhere {
+            if session.is_expired(::std::time::SystemTime::now()) {
+                return Err(GetCallerIdentityErrorModeled::ExpiredTokenException(ExpiredTokenException {
+                    message: Some("The security token included in the request is expired".to_string()),
+                })
+                .into());
+            }
+            return Ok(GetCallerIdentityOutput {
+                user_id: Some(session.user_id),
+                account: Some(session.account),
+                arn: Some(session.arn),
+            });
+        }
         // "Returns details about the IAM user or role whose credentials are used to call
         // the operation": a key that names no session here is an IAM user's own
         // long-term key, resolved against the IAM store (read before the session lock is

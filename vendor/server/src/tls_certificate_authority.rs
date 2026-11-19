@@ -44,7 +44,19 @@ impl TlsCertificateAuthority {
         if let Some(made) = PROCESS.get() {
             return Ok(made);
         }
-        let mut names: Vec<String> = ["localhost", "127.0.0.1", "::1"].map(String::from).into();
+        // fork: `<account-id>.localhost` too, so a client that prefixes the host with the
+        // account id (S3 Control, aws/aws-emulator#56) still verifies the certificate when it
+        // dials `https://localhost:<port>`; every name under `localhost` is loopback
+        // (RFC 6761 §6.3). Not `*.localhost`: rustls, NSS and OpenSSL ignore a wildcard
+        // followed by a single label.
+        let mut names: Vec<String> =
+            ["localhost", "127.0.0.1", "::1"].map(String::from).into();
+        names.insert(1, format!("{}.localhost", crate::EMULATOR_ACCOUNT_ID));
+        // fork: the extra loopback addresses a resource may listen on when its configured
+        // port is taken on 127.0.0.1 (`listeners::EXTRA_LOOPBACK_ADDRESSES`).
+        names.extend(
+            crate::listeners::EXTRA_LOOPBACK_ADDRESSES.map(|last| format!("127.0.0.{last}")),
+        );
         let bound = crate::bind_address_from_env().ok();
         for ip in [bound, client_host].into_iter().flatten() {
             let name = ip.to_string();

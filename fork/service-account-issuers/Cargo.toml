@@ -1,0 +1,19 @@
+[package]
+name = "aws-emulator-fork-service-account-issuers"
+description = "Registers the service account key set of an EKS cluster whose control plane runs outside the emulator."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bytes = { workspace = true }
+engine = { workspace = true }
+emulator-server = { workspace = true }
+http = { workspace = true }
+serde_json = { workspace = true }
+service-common = { path = "../../services/common" }
+service-com-amazonaws-eks-awswesleyfrontend = { workspace = true }
+
+[lints]
+workspace = true

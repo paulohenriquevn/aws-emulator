@@ -186,6 +186,8 @@ impl ComAmazonawsEc2Amazonec2State {
             .saturating_add(instance_payload_bytes(&record));
         let instance_id = record.instance_id.clone();
         self.instances.insert(record.instance_id.clone(), record);
+        // fork: a launch is the instance's first state change (`pending`).
+        self.note_instance_state(&instance_id);
         self.mint_launched_root_volume(&instance_id);
         if interfaces.is_empty() {
             self.mint_launched_primary_interface(&instance_id);
@@ -219,6 +221,9 @@ impl ComAmazonawsEc2Amazonec2State {
                 INSTANCE_STATE_REASON_USER_INITIATED_SHUTDOWN.to_string(),
                 INSTANCE_STATE_REASON_MESSAGE_USER_INITIATED_SHUTDOWN.to_string(),
             ));
+            // fork: announce `shutting-down`.
+            self.instance_state_events
+                .push(InstanceStateEvent::of(instance, at));
         }
         Some(previous)
     }
@@ -413,10 +418,16 @@ impl ComAmazonawsEc2Amazonec2State {
                 .pending_transition
                 .as_ref()
                 .filter(|pending| now >= pending.due_at)
-                .map(|pending| pending.to);
-            if let Some(state) = due {
+                .map(|pending| (pending.to, pending.due_at));
+            if let Some((state, due_at)) = due {
                 instance.state = state;
                 instance.pending_transition = None;
+                // fork: announce the state the clock moved the instance into, dated when
+                // the transition fell due.
+                self.instance_state_events.push(InstanceStateEvent::of(
+                    instance,
+                    super::instance_state_events::moved_at(due_at, now),
+                ));
                 // A completed termination releases the instance's primary private address:
                 // the interface that held it goes at this same instant (below), so EC2 has
                 // freed the address for reuse and a later launch may be given it.

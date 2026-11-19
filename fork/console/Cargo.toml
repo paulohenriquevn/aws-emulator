@@ -1,0 +1,15 @@
+[package]
+name = "aws-emulator-fork-console"
+description = "The read-only web console this fork serves at /_console/."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+
+[lints]
+workspace = true

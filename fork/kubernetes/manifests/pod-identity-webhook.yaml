@@ -1,0 +1,117 @@
+# amazon-eks-pod-identity-webhook, as EKS runs it: IRSA for service accounts annotated with
+# eks.amazonaws.com/role-arn, and EKS Pod Identity for the service accounts listed in
+# pod-identity.json (what EKS derives from the cluster's pod identity associations).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-identity-webhook
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-identity-webhook
+rules:
+- apiGroups: [""]
+  resources: [serviceaccounts]
+  verbs: [get, watch, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pod-identity-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-identity-webhook
+subjects:
+- kind: ServiceAccount
+  name: pod-identity-webhook
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-identity-webhook
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pod-identity-webhook
+  template:
+    metadata:
+      labels:
+        app: pod-identity-webhook
+    spec:
+      serviceAccountName: pod-identity-webhook
+      containers:
+      - name: pod-identity-webhook
+        image: @WEBHOOK_IMAGE@
+        command:
+        - /webhook
+        - --in-cluster=false
+        - --namespace=kube-system
+        - --service-name=pod-identity-webhook
+        - --port=8443
+        - --tls-cert=/etc/webhook/certs/tls.crt
+        - --tls-key=/etc/webhook/certs/tls.key
+        - --annotation-prefix=eks.amazonaws.com
+        - --token-audience=sts.amazonaws.com
+        - --aws-default-region=@REGION@
+        - --sts-regional-endpoint=true
+        - --watch-container-credentials-config=/etc/webhook/config/pod-identity.json
+        - --logtostderr
+        ports:
+        - containerPort: 8443
+        volumeMounts:
+        - name: cert
+          mountPath: /etc/webhook/certs
+          readOnly: true
+        - name: config
+          mountPath: /etc/webhook/config
+          readOnly: true
+      volumes:
+      - name: cert
+        secret:
+          secretName: pod-identity-webhook-cert
+      - name: config
+        configMap:
+          name: pod-identity-webhook-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pod-identity-webhook
+  namespace: kube-system
+spec:
+  selector:
+    app: pod-identity-webhook
+  ports:
+  - port: 443
+    targetPort: 8443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: pod-identity-webhook
+webhooks:
+- name: pod-identity-webhook.amazonaws.com
+  failurePolicy: Ignore
+  clientConfig:
+    caBundle: @CA_BUNDLE@
+    service:
+      name: pod-identity-webhook
+      namespace: kube-system
+      path: /mutate
+  objectSelector:
+    matchExpressions:
+    - key: eks.amazonaws.com/skip-pod-identity-webhook
+      operator: DoesNotExist
+  rules:
+  - operations: [CREATE]
+    apiGroups: [""]
+    apiVersions: [v1]
+    resources: [pods]
+  sideEffects: None
+  admissionReviewVersions: [v1beta1]

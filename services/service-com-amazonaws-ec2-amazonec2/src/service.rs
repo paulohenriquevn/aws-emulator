@@ -779,6 +779,11 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for FinishedEnvelope<Eng> {
                 // names none is, rather than with an invented envelope.
                 None => svc.definition().routing_error_response(req),
             };
+            // fork: publish the instance state changes this call made (or applied for the
+            // clock) on EventBridge, and keep a task waiting for the ones the clock still
+            // owes (`crate::state::instance_state_events`).
+            crate::state::publish_instance_state_events(ctx.callback(), &*self.engine).await;
+            crate::state::drive_instance_state_clock(ctx, &self.engine);
             stamp_envelope(&mut response);
             response
         })

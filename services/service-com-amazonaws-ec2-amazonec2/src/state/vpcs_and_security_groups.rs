@@ -2077,10 +2077,20 @@ impl SecurityGroupRuleAtom {
     /// description, you do not need to specify the description to revoke the rule"
     /// (`RevokeSecurityGroupIngress`).
     pub fn identity(&self) -> SecurityGroupRuleKey {
+        // fork: "Specifying -1 or a protocol number other than tcp, udp, icmp, or icmpv6
+        // allows traffic on all ports, regardless of any port range you specify"
+        // (`IpPermission$IpProtocol`), so such a rule's port range is no part of what it is.
+        // The Terraform AWS provider revokes the default egress rule as `-1` with ports 0-0
+        // (aws/aws-emulator#46).
+        let (from_port, to_port) = if protocol_carries_ports(&self.ip_protocol) {
+            (self.from_port, self.to_port)
+        } else {
+            (None, None)
+        };
         SecurityGroupRuleKey {
             ip_protocol: self.ip_protocol.clone(),
-            from_port: self.from_port,
-            to_port: self.to_port,
+            from_port,
+            to_port,
             source: self.source.clone(),
         }
     }

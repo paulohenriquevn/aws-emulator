@@ -1,0 +1,18 @@
+# The agent calls the emulator's EKS Auth, whose certificate the emulator's own CA signs.
+# run.sh points SSL_CERT_FILE at it as well as AWS_CA_BUNDLE: the agent calls EKS Auth with
+# an HTTP client of its own (internal/cloud/eksauth/service.go), which AWS_CA_BUNDLE never
+# reaches, and Go's TLS stack trusts what SSL_CERT_FILE names.
+daemonsets:
+  cloud:
+    volumes:
+    - name: jwk-cache
+      emptyDir: {}
+    - name: emulator-ca
+      configMap:
+        name: emulator-ca
+    volumeMounts:
+    - mountPath: /var/lib/eks-pod-identity-agent
+      name: jwk-cache
+    - mountPath: /etc/emulator
+      name: emulator-ca
+      readOnly: true

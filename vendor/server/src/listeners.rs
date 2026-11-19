@@ -84,6 +84,32 @@ fn bind_std(bind_ip: IpAddr, range: PortRange) -> Result<std::net::TcpListener, 
     }
 }
 
+/// fork: the extra loopback addresses a preferred port may land on when another
+/// listener holds it on `127.0.0.1`, so two resources configured with the same port
+/// (two RDS instances on 5432) both serve it. Linux routes all of `127.0.0.0/8` to the
+/// loopback interface; where only `127.0.0.1` is configured (macOS by default) these
+/// binds fail and the caller falls back to the listener range. The process certificate
+/// names each of them ([`crate::TlsCertificateAuthority`]).
+pub const EXTRA_LOOPBACK_ADDRESSES: std::ops::RangeInclusive<u8> = 2..=16;
+
+/// fork: bind `port` on `bind_ip`, or, on the default `127.0.0.1` bind, on the first
+/// [`EXTRA_LOOPBACK_ADDRESSES`] address where it is free. `None` when none is.
+async fn bind_preferred(bind_ip: IpAddr, port: u16) -> Option<tokio::net::TcpListener> {
+    if let Ok(listener) = tokio::net::TcpListener::bind((bind_ip, port)).await {
+        return Some(listener);
+    }
+    if bind_ip != IpAddr::from([127, 0, 0, 1]) {
+        return None;
+    }
+    for last in EXTRA_LOOPBACK_ADDRESSES {
+        let ip = IpAddr::from([127, 0, 0, last]);
+        if let Ok(listener) = tokio::net::TcpListener::bind((ip, port)).await {
+            return Some(listener);
+        }
+    }
+    None
+}
+
 /// Async sibling of [`bind_std`] for the native (`tcp`) path.
 async fn bind_tokio(bind_ip: IpAddr, range: PortRange) -> Result<tokio::net::TcpListener, SurfaceError> {
     match range {
@@ -217,7 +243,7 @@ impl Listeners {
     ) -> Result<ResourceListener, SurfaceError> {
         let server_config = Arc::new(self.rustls_server_config()?);
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-        serve_native(handler, idle, Some(acceptor)).await
+        serve_native(handler, idle, Some(acceptor), None).await
     }
 
     /// Open a native-protocol (TCP) listener that hands the RAW, unencrypted
@@ -231,7 +257,28 @@ impl Listeners {
         &self,
         handler: H,
     ) -> Result<ResourceListener, SurfaceError> {
-        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None).await
+        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None, None).await
+    }
+
+    /// fork: [`Self::tcp_plaintext`] on `preferred_port` when it is free on the bind
+    /// interface, else on a port from the configured range as `tcp_plaintext` picks one.
+    ///
+    /// For a resource whose API publishes the port it was configured with (an RDS
+    /// instance's `Endpoint.Port` is the `Port` it was created with): a client that reads
+    /// the port back, such as the Terraform AWS provider, sees the value it set, and a port
+    /// another process holds still leaves the resource reachable.
+    pub async fn tcp_plaintext_preferring<H: NativeHandler>(
+        &self,
+        handler: H,
+        preferred_port: u16,
+    ) -> Result<ResourceListener, SurfaceError> {
+        serve_native(
+            handler,
+            Duration::from_secs(caps::IDLE_TIMEOUT_SECS),
+            None,
+            Some(preferred_port),
+        )
+        .await
     }
 }
 
@@ -285,10 +332,19 @@ async fn serve_native<H: NativeHandler>(
     handler: H,
     idle: Duration,
     tls: Option<tokio_rustls::TlsAcceptor>,
+    preferred_port: Option<u16>,
 ) -> Result<ResourceListener, SurfaceError> {
     {
         let acceptor = tls;
-        let listener = bind_tokio(bind_ip_from_env()?, listener_port_range_from_env()?).await?;
+        let bind_ip = bind_ip_from_env()?;
+        let preferred = match preferred_port.filter(|port| *port != 0) {
+            Some(port) => bind_preferred(bind_ip, port).await,
+            None => None,
+        };
+        let listener = match preferred {
+            Some(listener) => listener,
+            None => bind_tokio(bind_ip, listener_port_range_from_env()?).await?,
+        };
         let addr = listener.local_addr().map_err(|e| SurfaceError::Bind(e.to_string()))?;
 
         let handler = Arc::new(handler);

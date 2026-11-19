@@ -231,6 +231,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             });
         }
 
+        // fork: announce the state each instance this call moved is now in
+        // (`crate::state::instance_state_events`).
+        for change in &changes {
+            let name = |state: &Option<InstanceState>| state.as_ref().and_then(|state| state.name.clone());
+            if name(&change.previous_state) != name(&change.current_state) {
+                if let Some(instance_id) = &change.instance_id {
+                    store.note_instance_state(instance_id);
+                }
+            }
+        }
+
         Ok(StartInstancesOutput {
             starting_instances: Some(changes),
         })

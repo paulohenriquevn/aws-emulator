@@ -463,6 +463,21 @@ pub fn published_key_set<Eng: Send + Sync + 'static>(
     engine: &Eng,
     issuer: &str,
 ) -> Option<::serde_json::Value> {
+    // fork: the issuer of a cluster whose control plane runs outside the emulator (a local
+    // Kubernetes cluster standing in for an EKS cluster) publishes the key set registered
+    // for it ([`::service_common::service_account_issuers`]).
+    let registered = (engine as &dyn ::std::any::Any)
+        .downcast_ref::<::engine::InMemoryEngine>()
+        .and_then(|engine| {
+            engine
+                .state::<::service_common::service_account_issuers::ServiceAccountIssuerKeys>()
+                .lock()
+                .key_set(issuer)
+                .cloned()
+        });
+    if registered.is_some() {
+        return registered;
+    }
     let pools = ::service_com_amazonaws_cognitoidentityprovider_awscognitoidentityproviderservice
         ::state::service_state(engine)?;
     // A user pool's issuer URL ends in the pool's own id, which is how the pool that

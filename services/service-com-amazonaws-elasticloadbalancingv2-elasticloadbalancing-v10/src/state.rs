@@ -3955,6 +3955,10 @@ pub struct ListenerRecord {
     /// listener has one, it carries the listener's default actions, and it is what
     /// `DescribeRules` reports for a listener nothing else has added a rule to.
     pub default_rule_id: String,
+    /// fork: the tags of this listener's DEFAULT rule. AWS lets `AddTags`, `RemoveTags`
+    /// and `DescribeTags` name a default rule like any other, and the AWS Load Balancer
+    /// Controller reads them for every rule of a listener it manages.
+    pub default_rule_tags: HashMap<String, String>,
     /// The rules a caller added to this listener with `CreateRule`, in the order they
     /// were added; a read orders them by priority
     /// ([`ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State::rules_of`]).
@@ -4575,6 +4579,14 @@ impl ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State {
             .or_else(|| self.listeners.get(arn).map(|record| &record.tags))
             .or_else(|| self.trust_stores.get(arn).map(|record| &record.tags))
             .or_else(|| self.rule_record(arn).map(|record| &record.tags))
+            .or_else(|| self.default_rule_listener(arn).map(|listener| &listener.default_rule_tags))
+    }
+
+    /// fork: the listener whose DEFAULT rule `arn` names, or `None` when `arn` names no
+    /// default rule this store holds.
+    fn default_rule_listener(&self, arn: &str) -> Option<&ListenerRecord> {
+        let listener = self.listeners.get(&rule_listener_arn(arn)?)?;
+        (listener.default_rule_arn() == arn).then_some(listener)
     }
 
     /// The tags stored on the resource `arn` names, to WRITE, or `None` when this store
@@ -4596,7 +4608,15 @@ impl ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State {
             TaggableResource::TrustStore => {
                 self.trust_stores.get_mut(arn).map(|rec| &mut rec.tags)
             }
-            TaggableResource::Rule => self.rule_record_mut(arn).map(|rec| &mut rec.tags),
+            TaggableResource::Rule => {
+                // fork: a listener's default rule keeps its tags on the listener.
+                let listener = self.listeners.get_mut(&rule_listener_arn(arn)?)?;
+                if listener.default_rule_arn() == arn {
+                    Some(&mut listener.default_rule_tags)
+                } else {
+                    listener.rules.iter_mut().find(|rule| rule.arn == arn).map(|rec| &mut rec.tags)
+                }
+            }
         }
     }
 

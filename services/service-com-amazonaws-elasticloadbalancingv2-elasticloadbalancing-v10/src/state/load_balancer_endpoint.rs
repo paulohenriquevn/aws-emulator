@@ -84,6 +84,9 @@ pub async fn open_load_balancer_endpoint<Eng: Send + Sync + 'static>(
     engine: &Eng,
     callback: EmbeddedEmulator,
 ) -> Option<LoadBalancerEndpoint> {
+    if !listener_sockets_enabled(std::env::var(LISTENER_SOCKETS_ENV).ok().as_deref()) {
+        return None;
+    }
     let shared = (engine as &dyn ::std::any::Any).downcast_ref::<::engine::InMemoryEngine>()?;
     let load_balancer: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
     let listeners = shared.listeners();
@@ -139,4 +142,32 @@ pub fn certificate_key_material_directory<Eng: Send + Sync + 'static>(
                 ::service_common::acm_certificate_key_material::CertificateKeyMaterialDirectory,
             >,
         )
+}
+
+/// fork: the variable that turns the per-load-balancer sockets off. With
+/// `EMULATOR_ELB_LISTENER_SOCKETS=off` an Application Load Balancer publishes the name
+/// Elastic Load Balancing's own zone would carry (`<name>-<id>.<region>.elb.amazonaws.com`)
+/// and is served at the emulator's endpoint for a request whose `Host` is that name. A
+/// consumer that requires a DNS name, such as the status of a Kubernetes Ingress, cannot
+/// take the `host:port` a socket publishes.
+pub const LISTENER_SOCKETS_ENV: &str = "EMULATOR_ELB_LISTENER_SOCKETS";
+
+/// fork: whether a value of [`LISTENER_SOCKETS_ENV`] leaves the sockets on. Only `off`
+/// (in any case) turns them off, so an unset or mistyped value keeps the default.
+pub fn listener_sockets_enabled(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| value.trim().eq_ignore_ascii_case("off"))
+}
+
+#[cfg(test)]
+mod listener_sockets_tests {
+    use super::listener_sockets_enabled;
+
+    #[test]
+    fn only_off_turns_the_listener_sockets_off() {
+        assert!(listener_sockets_enabled(None));
+        assert!(listener_sockets_enabled(Some("on")));
+        assert!(listener_sockets_enabled(Some("of")));
+        assert!(!listener_sockets_enabled(Some("off")));
+        assert!(!listener_sockets_enabled(Some(" OFF ")));
+    }
 }

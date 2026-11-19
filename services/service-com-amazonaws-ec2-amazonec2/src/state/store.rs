@@ -1257,6 +1257,9 @@ pub struct ComAmazonawsEc2Amazonec2State {
     pub reservation_order: Vec<String>,
     /// Instances by `InstanceId`.
     pub instances: HashMap<String, InstanceRecord>,
+    /// fork: the state changes of [`Self::instances`] not yet published on EventBridge
+    /// ([`super::instance_state_events`]).
+    pub instance_state_events: super::InstanceStateEvents,
     /// The ClassicLink link of each LINKED EC2-Classic instance, by the `InstanceId` it is
     /// a link of: only what the link itself adds (the VPC and the security groups), since
     /// the tags and group names `ClassicLinkInstance` also reports belong to the instance
@@ -3263,6 +3266,7 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             reservations: HashMap::new(),
             reservation_order: Vec::new(),
             instances: HashMap::new(),
+            instance_state_events: super::InstanceStateEvents::default(),
             // A fresh account holds no EC2-Classic instance, so nothing is linked to a
             // ClassicLink-enabled VPC either.
             classic_link_instances: BTreeMap::new(),
