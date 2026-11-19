@@ -179,6 +179,20 @@ async fn a_group_with_transit_encryption_is_reached_over_tls() {
     assert!(reply.starts_with("-NOAUTH"), "a server answered over TLS: {reply:?}");
 }
 
+/// The Terraform AWS provider reads a group's `port` back from its primary endpoint, so an
+/// endpoint on any other port than the configured one is drift on every plan.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
+async fn the_primary_endpoint_reports_the_configured_port() {
+    let _backend = container_backend();
+    let emulator = Emulator::new();
+
+    let (host, port) = served_group(&emulator, "port-group", &[("Port", "6390")]).await;
+
+    assert_eq!(port, 6390, "the endpoint {host}:{port} is not on the group's Port");
+    command_over(plain(host, port), &["PING"]).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Docker; run with --ignored"]
 async fn a_deleted_group_leaves_no_container_behind() {

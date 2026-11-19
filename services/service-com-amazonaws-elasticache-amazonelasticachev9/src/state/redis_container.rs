@@ -366,6 +366,7 @@ pub async fn open_endpoint<Eng: Send + Sync + 'static>(
     engine_version: Option<&str>,
     password: Option<String>,
     transit_encryption: bool,
+    port: i32,
 ) -> Result<RedisEndpoint, String> {
     let (image, server) =
         image_for(engine_name, engine_version).ok_or_else(|| format!("engine {engine_name} is not served by a container"))?;
@@ -388,12 +389,16 @@ pub async fn open_endpoint<Eng: Send + Sync + 'static>(
         server,
         password,
     });
-    let listener = listeners
-        .tcp_plaintext(RedisProxy {
-            container: Arc::clone(&container),
-            tls,
-        })
-        .await
+    // The configured port when it is free (on another loopback address when 127.0.0.1
+    // already serves it), so the endpoint reports the `Port` the cache was created with.
+    let proxy = RedisProxy {
+        container: Arc::clone(&container),
+        tls,
+    };
+    let listener = match u16::try_from(port) {
+        Ok(preferred) => listeners.tcp_plaintext_preferring(proxy, preferred).await,
+        Err(_) => listeners.tcp_plaintext(proxy).await,
+    }
         .map_err(|error| format!("the cache endpoint could not be opened: {error}"))?;
     Ok(RedisEndpoint {
         host: listener.host(),
@@ -412,6 +417,8 @@ pub struct ServedCache {
     pub engine_version: Option<String>,
     pub password: Option<String>,
     pub transit_encryption: bool,
+    /// The cache's `Port` (6379 by default), which the endpoint listens on when it is free.
+    pub port: i32,
 }
 
 impl std::fmt::Debug for ServedCache {
@@ -422,6 +429,7 @@ impl std::fmt::Debug for ServedCache {
             .field("engine_version", &self.engine_version)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("transit_encryption", &self.transit_encryption)
+            .field("port", &self.port)
             .finish()
     }
 }
@@ -443,6 +451,7 @@ pub fn serve_in_background<Eng: Send + Sync + 'static>(
             cache.engine_version.as_deref(),
             cache.password.clone(),
             cache.transit_encryption,
+            cache.port,
         )
         .await
         {

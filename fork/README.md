@@ -189,7 +189,9 @@ backend on, and the `data` fixture writes and reads a value over TLS.
 
 The group's primary and reader endpoints, and the endpoint of every node, become an emulator
 listener on the emulator's host, which passes each connection on to the container (loopback
-only). With `TransitEncryptionEnabled` the listener runs TLS with the emulator's certificate from
+only). The listener takes the cache's `Port` (6379 by default) when it is free, on another
+loopback address when 127.0.0.1 already serves it, so the Terraform AWS provider reads back the
+port it set. With `TransitEncryptionEnabled` the listener runs TLS with the emulator's certificate from
 the first byte. Deleting the group or the cluster removes the container; containers carry the
 label `aws-emulator.service=elasticache`.
 

@@ -1322,6 +1322,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             engine_version: Some(group.engine_version.clone()),
                             password: input.auth_token.clone(),
                             transit_encryption: group.transit_encryption_enabled,
+                            port: group.port,
                         },
                     );
                 }

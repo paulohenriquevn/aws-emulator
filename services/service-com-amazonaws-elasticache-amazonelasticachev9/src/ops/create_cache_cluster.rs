@@ -942,6 +942,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             engine_version: Some(cluster.engine_version.clone()),
                             password: input.auth_token.clone(),
                             transit_encryption: cluster.transit_encryption_enabled.unwrap_or(false),
+                            port: cluster.endpoint_port,
                         },
                     );
                 }
