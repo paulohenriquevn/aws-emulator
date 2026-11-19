@@ -6,8 +6,10 @@
 //! Each case creates an instance through the RDS API, connects to the endpoint it publishes
 //! the way libpq does (TLS by `SSLRequest`, then SCRAM-SHA-256), and checks what only a real
 //! server answers: the major version, an extension the in-process engine does not have.
-//! Needs Docker. The cases run one at a time, because the backend is chosen by an
-//! environment variable of this process.
+//! Needs Docker, so every case is `#[ignore]`d and CI runs them on their own with
+//! `cargo test --test all postgres_container -- --ignored`. The cases run one at a time, and
+//! never beside the rest of the suite, because the backend is chosen by an environment
+//! variable of this process.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -389,6 +391,7 @@ fn container_exists(name: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
 #[allow(clippy::await_holding_lock)]
 async fn the_endpoint_is_a_real_postgres_server_of_the_requested_major_version() {
     let _serial = container_backend();
@@ -409,6 +412,7 @@ async fn the_endpoint_is_a_real_postgres_server_of_the_requested_major_version()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
 #[allow(clippy::await_holding_lock)]
 async fn a_plaintext_session_is_refused_while_rds_force_ssl_is_on() {
     let _serial = container_backend();
@@ -423,6 +427,7 @@ async fn a_plaintext_session_is_refused_while_rds_force_ssl_is_on() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
 #[allow(clippy::await_holding_lock)]
 async fn a_modified_master_password_is_the_one_that_logs_in() {
     let _serial = container_backend();
@@ -452,6 +457,7 @@ async fn a_modified_master_password_is_the_one_that_logs_in() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
 #[allow(clippy::await_holding_lock)]
 async fn a_deleted_instance_leaves_no_container_behind() {
     let _serial = container_backend();

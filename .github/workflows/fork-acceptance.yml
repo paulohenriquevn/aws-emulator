@@ -116,7 +116,7 @@ jobs:
           target_forwarding
 
       - name: RDS for PostgreSQL on real PostgreSQL containers
-        run: cargo test -p service-com-amazonaws-rds-amazonrdsv19 --test postgres_container
+        run: cargo test -p service-com-amazonaws-rds-amazonrdsv19 --test all postgres_container -- --ignored --test-threads=1
 
       - name: The TLS test fails without the account-prefixed localhost name
         run: |
