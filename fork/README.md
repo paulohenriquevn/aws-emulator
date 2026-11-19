@@ -14,6 +14,7 @@ account. Everything the fork adds lives in this directory, plus a few patches in
 | `console/` | The read-only web console the binary serves at `/_console/`: a React app in `console/web` and the crate that embeds its build. |
 | `acceptance/` | Eight Terraform fixtures (billing, compute, data, edge, network, operations, registry, security) and `run.sh`, which runs each one against a fresh emulator. |
 | `service-account-issuers/` | The route that registers a Kubernetes cluster's service account key set for an EKS cluster of the emulator. |
+| `iam-gate/` | Judges every signed call against the caller's IAM policies when `EMULATOR_IAM_ENFORCE=on` (see IAM on every service). |
 | `access-log/` | Logs one line per request the binary answers (`RUST_LOG=info,access=debug`): the operation, its status and error code, and how long it took. |
 | `kubernetes/` | `run.sh`, which runs real in-cluster controllers and workload identity in a kind cluster against the emulator, with the manifests and chart values it applies. |
 
@@ -89,6 +90,7 @@ authentication on, the route takes only requests signed with the emulator's own 
 | Check | Passes when |
 |---|---|
 | `irsa` | A pod whose service account is annotated with a role is that role (`sts get-caller-identity`). |
+| `iam-enforced` | The IRSA probe's role allows only `sts:GetCallerIdentity`, and EC2 refuses its `DescribeVpcs` with `UnauthorizedOperation`. |
 | `pod-identity` | A pod whose service account has a pod identity association gets the role's credentials from the EKS Pod Identity Agent. |
 | `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with the kind node's instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target), the target healthy, and a request to the ALB's name answered by the echo pod's nginx. |
 | `external-secrets` | External Secrets, on IRSA, copies a Secrets Manager secret into a Kubernetes Secret. |
@@ -121,6 +123,30 @@ it never gives the instance's address to a container.
 It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git, and network
 access for images and charts. The emulator listens on the gateway of kind's Docker network
 (`-b`), and every pod that calls it mounts its CA. The `kubernetes` job of the workflow runs it.
+
+## IAM on every service
+
+Upstream asks IAM only from IAM itself, Secrets Manager, ACM and part of KMS; every other service
+serves any signed call. With `EMULATOR_IAM_ENFORCE=on`, the router asks the caller's
+identity-based policies (and permissions boundary) about every call, after request authentication
+and before the operation runs (`iam-gate/`). The action is `<IAM prefix>:<operation>`: the signing
+name, with `monitoring` read as `cloudwatch`, and S3 operations mapped to the action IAM checks
+(`ListObjectsV2` and `HeadBucket` to `s3:ListBucket`, `HeadObject` to `s3:GetObject`). A refusal
+is a 403 in the service's protocol: `UnauthorizedOperation` for EC2, `AccessDeniedException` for
+the JSON protocols and `AccessDenied` for the others.
+
+The decision is simulated at the action level, because the router does not know which resource a
+request addresses or what its condition keys would hold. An `Allow` counts for every action it
+names, whatever its `Resource` and `Condition`. A `Deny` counts only on `"Resource": "*"` without
+a condition. A role missing an action is refused, and a role whose grant is scoped by ARN or tag
+(as the AWS Load Balancer Controller's policy is) is not refused by mistake. A scoped `Deny` is
+not applied at all.
+
+Not asked about: the account's own credential (the emulator's administrator), an unsigned
+request, a call one emulated service makes into another, a principal holding an AWS managed
+policy the emulator does not carry, and IAM, STS, Secrets Manager and ACM, which authorize their
+own calls. `fork/kubernetes/run.sh` turns the gate on and gives each role the policy its
+controller documents.
 
 ## Real PostgreSQL for RDS
 
@@ -173,6 +199,7 @@ upstream ships the fix.
 | SSM | EKS optimized AL2023 AMI parameters | aws/aws-emulator#535 |
 | TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |
 | RDS (and core listeners) | An instance created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves it, so `Endpoint.Port` matches it | aws/aws-emulator#537 |
+| Core router | `MultiServiceRouter` runs an installed `RequestAuthorizer` after request authentication (`vendor/smithy-server-runtime/src/multi_service_router.rs`), which `iam-gate/` installs | not reported yet |
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |
 | Elastic Load Balancing v2 | `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule, which `DescribeRules` reports | not reported yet |

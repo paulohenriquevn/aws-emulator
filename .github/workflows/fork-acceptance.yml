@@ -157,6 +157,12 @@ jobs:
           cargo test
           -p aws-emulator-fork-router --test external_cluster_identity
 
+      - name: IAM policies are enforced on every service
+        run: >-
+          cargo test
+          -p aws-emulator-fork-iam-gate
+          -p aws-emulator-fork-router --test iam_enforcement
+
       - name: Unit tests of the workload identity patches
         run: >-
           cargo test --lib

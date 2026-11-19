@@ -1,0 +1,21 @@
+[package]
+name = "aws-emulator-fork-iam-gate"
+description = "Applies the caller's IAM identity-based policies to every service the fork mounts, at the level of the action."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+emulator-server = { workspace = true }
+engine = { workspace = true }
+http = { workspace = true }
+serde_json = { workspace = true }
+service-common = { path = "../../services/common" }
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+smithy-server-runtime = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

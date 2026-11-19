@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `EMULATOR_RDS_BACKEND=docker` serves an RDS for PostgreSQL DB instance with a real PostgreSQL server of its major version in a container, behind the instance's own endpoint, which keeps the instance status, `rds.force_ssl` and TLS with the emulator's certificate (#5)
 - The `data` acceptance fixture logs in to its RDS instance with the managed secret over TLS and installs `pgcrypto` (#5)
 - An `HTTPS` target group gets its requests over TLS, and the load balancer does not validate the target's certificate, as on AWS (#6)
+- `EMULATOR_IAM_ENFORCE=on` judges every signed call to every service against the caller's identity-based policies at the action level, and `fork/kubernetes/run.sh` runs with it on, each role holding the policy its controller documents (#7)
 - `fork/kubernetes/run.sh` runs kind on a Docker network that is also the EKS cluster's VPC, gives the node container the node instance's private address, and sends a request through the ALB the AWS Load Balancer Controller creates and checks the echo pod answers it (#4)
 
 ### Fixed

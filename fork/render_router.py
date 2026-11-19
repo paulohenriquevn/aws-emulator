@@ -66,6 +66,7 @@ path = "src/main.rs"
 aws-emulator-fork-console = {{ workspace = true }}
 aws-emulator-fork-service-account-issuers = {{ workspace = true }}
 aws-emulator-fork-access-log = {{ workspace = true }}
+aws-emulator-fork-iam-gate = {{ workspace = true }}
 engine = {{ workspace = true }}
 emulator-server = {{ workspace = true }}
 emulator-telemetry = {{ workspace = true }}
@@ -133,7 +134,13 @@ def render_lib(services: list[str]) -> str:
         + "pub fn build_services(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {\n"
         + "    let router = MultiServiceRouter::new();\n"
         + calls
-        + "\n    router\n}\n\n"
+        + "\n    let mut router = router;\n"
+        + "    if aws_emulator_fork_iam_gate::enforce_enabled(\n"
+        + "        std::env::var(aws_emulator_fork_iam_gate::ENFORCE_ENV).ok().as_deref(),\n"
+        + "    ) {\n"
+        + "        aws_emulator_fork_iam_gate::install(&mut router, Arc::clone(&engine));\n"
+        + "    }\n"
+        + "    router\n}\n\n"
         + "\n".join(helpers)
     )
 

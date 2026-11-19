@@ -412,6 +412,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-emulator-fork-iam-gate"
+version = "0.1.0"
+dependencies = [
+ "aws-emulator-engine",
+ "aws-emulator-server",
+ "aws-emulator-smithy-server-runtime",
+ "http",
+ "serde_json",
+ "service-com-amazonaws-iam-awsidentitymanagementv20100508",
+ "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
+ "service-common",
+ "tracing",
+]
+
+[[package]]
 name = "aws-emulator-fork-router"
 version = "0.1.0"
 dependencies = [
@@ -419,6 +434,7 @@ dependencies = [
  "aws-emulator-engine",
  "aws-emulator-fork-access-log",
  "aws-emulator-fork-console",
+ "aws-emulator-fork-iam-gate",
  "aws-emulator-fork-service-account-issuers",
  "aws-emulator-server",
  "aws-emulator-smithy-server-runtime",
