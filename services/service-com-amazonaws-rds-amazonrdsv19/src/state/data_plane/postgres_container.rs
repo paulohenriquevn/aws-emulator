@@ -482,7 +482,9 @@ impl ::emulator_server::NativeHandler for PostgresContainerProxy {
             // fork: a connection the instance's security groups do not admit is closed before
             // anything is read from it, as a dropped SYN never reaches the server on AWS.
             let peer = ::emulator_server::connection_peer();
-            if refused_by_security_groups(&context, firewall.as_ref(), peer) {
+            let refused = refused_by_security_groups(&context, firewall.as_ref(), peer);
+            tracing::debug!(container = %name, ?peer, refused, "the DB instance's security groups judged a connection");
+            if refused {
                 tracing::warn!(container = %name, ?peer, "the DB instance's security groups do not admit this connection");
                 drop(conn);
                 return;

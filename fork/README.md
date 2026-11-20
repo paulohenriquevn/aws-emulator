@@ -94,6 +94,7 @@ authentication on, the route takes only requests signed with the emulator's own 
 | `pod-identity` | A pod whose service account has a pod identity association gets the role's credentials from the EKS Pod Identity Agent. |
 | `node-group` | The EKS managed node group's instances are the kind workers: `kubectl get nodes` lists one worker per instance, each `providerID` naming its instance, and the workers are `Ready`. |
 | `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with every node group instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target), every target healthy, and a request to the ALB's name answered by the echo pod's nginx. |
+| `database` | A pod runs `select 1` with `psql` over TLS on an RDS for PostgreSQL instance (a real PostgreSQL container) whose security group admits the nodes' groups on its port, and gets `1`; on an instance whose group has no inbound rule, the connection is closed. |
 | `external-secrets` | External Secrets, on IRSA, copies a Secrets Manager secret into a Kubernetes Secret. |
 | `opencost` | OpenCost reports the node's hourly cost as the emulator's on-demand price for its instance type. |
 
@@ -126,6 +127,20 @@ launches the instances in EC2 (below), and each one becomes a kind worker the sa
 `providerID`, zone and `eks.amazonaws.com/nodegroup` label in `kind.yaml`, and its private address
 added to the worker container's interface. The control-plane node keeps the instance launched
 above.
+
+Each node also sends its traffic to the emulator from the instance's address: its own through
+a route (`ip route add <gateway>/32 src <instance address>`), its pods' TCP through a SNAT rule
+ahead of kind's masquerade, which would otherwise pick the node's Docker address. A connection
+from the node or a pod then arrives from the address an ENI of the account holds, as from an
+EKS node. The security groups of an
+RDS or ElastiCache endpoint then judge the node instance's groups (see "Security groups on
+database endpoints"). The harness runs RDS with `EMULATOR_RDS_BACKEND=docker`.
+
+With `KEEP_CLUSTER=1` the emulator and the cluster stay up after the checks, and
+`$KUBERNETES_WORK/environment.sh` holds what a consumer needs to keep working on them: the AWS
+CLI's endpoint, CA and credentials, `KUBECONFIG`, the EKS cluster's name and issuer, the VPC,
+its subnets and the node instances' security groups. Name the checks a consumer needs, such
+as `run.sh <binary> load-balancer`, to install only what they install.
 
 It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git, and network
 access for images and charts. The emulator listens on the gateway of kind's Docker network

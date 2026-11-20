@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-20
+
 ### Added
 - An Application Load Balancer passes a request its `forward` action sends to an `instance` or `ip` target on to that target over HTTP/1.1 and answers with the target's response, with 502 when the target cannot be reached and 504 when it does not answer in time; it answered 502 for every such request (#4)
 - `EMULATOR_RDS_BACKEND=docker` serves an RDS for PostgreSQL DB instance with a real PostgreSQL server of its major version in a container, behind the instance's own endpoint, which keeps the instance status, `rds.force_ssl` and TLS with the emulator's certificate (#5)
@@ -19,6 +21,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `fork/kubernetes/run.sh` creates a managed node group and runs one kind worker per instance, with the instance's providerID, and checks the ALB targets all of them (#9)
 - A container-backed RDS for PostgreSQL or ElastiCache endpoint closes a connection the DB instance's or the cache's VPC security groups do not admit before reading from it, when the source address is held by a network interface of the account; a source no network interface holds is let through (#11)
 - `fork/kubernetes/run.sh` runs kind on a Docker network that is also the EKS cluster's VPC, gives the node container the node instance's private address, and sends a request through the ALB the AWS Load Balancer Controller creates and checks the echo pod answers it (#4)
+- `fork/kubernetes/run.sh` checks that a pod reaches an RDS for PostgreSQL instance whose security group admits the nodes, and that an instance whose group admits nothing closes the pod's connection; each node sends its traffic to the emulator from its instance's address (#13)
+- With `KEEP_CLUSTER=1`, `fork/kubernetes/run.sh` writes `environment.sh`, which a consumer sources to keep working on the emulator and the cluster (#13)
+- A version tag publishes the emulator binary its workflow run tested, with its SHA-256, on the tag's GitHub release (#13)
+- `fork/kubernetes/run.sh` translates a pod's TCP connection to the emulator to its node instance's address, so a database's security groups judge the node's groups (#13)
+- `fork/kubernetes/run.sh` pulls the images its probes and the load balancer controller run once on the host, retrying when the registry refuses, and loads them into every node (#13)
 
 ### Fixed
 - Removing a deleted DB instance's or cache's container no longer removes a newer container of the same name, such as the one for an instance or group created again with the same identifier; the emulator removes a container by its Docker id, and a container dropped while it starts is removed once `docker run` answers (#12)
@@ -58,5 +65,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - An RDS instance or cluster created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves that port, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
 - The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)
 
-[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/paulohenriquevn/aws-emulator/releases/tag/v0.1.0
