@@ -68,6 +68,12 @@ pub fn build_services(engine: Arc<InMemoryEngine>) -> MultiServiceRouter {
     let router = mount_chunk_03(router, &engine);
     let router = mount_chunk_04(router, &engine);
     let router = mount_chunk_05(router, &engine);
+    let mut router = router;
+    if aws_emulator_fork_iam_gate::enforce_enabled(
+        std::env::var(aws_emulator_fork_iam_gate::ENFORCE_ENV).ok().as_deref(),
+    ) {
+        aws_emulator_fork_iam_gate::install(&mut router, Arc::clone(&engine));
+    }
     router
 }
 

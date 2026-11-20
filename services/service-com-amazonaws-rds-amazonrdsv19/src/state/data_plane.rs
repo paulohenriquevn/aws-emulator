@@ -73,6 +73,8 @@ pub mod pg_numeric;
 pub mod pg_server;
 pub mod pg_sessions;
 pub mod pg_wire;
+// fork: a PostgreSQL DB instance served by a real PostgreSQL server in a container.
+pub mod postgres_container;
 pub mod read_only;
 pub mod row_locks;
 pub mod server_statements;
@@ -239,6 +241,9 @@ pub struct DbEngineEndpoint {
     /// The same, for the read-only endpoint of this engine where it has one: dropping the
     /// record closes both ports.
     _reader_listener: Option<::emulator_server::ResourceListener>,
+    /// fork: the PostgreSQL container the endpoint passes its sessions on to, for an
+    /// instance served by one ([`postgres_container`]). Dropping the record removes it.
+    container: Option<Arc<postgres_container::PostgresContainer>>,
 }
 
 /// Written by hand rather than derived: the endpoint holds a core `ResourceListener` and a
@@ -256,6 +261,13 @@ impl std::fmt::Debug for DbEngineEndpoint {
 }
 
 impl DbEngineEndpoint {
+    /// fork: the PostgreSQL container this endpoint passes its sessions on to, for an
+    /// instance served by one.
+    #[must_use]
+    pub fn container(&self) -> Option<&Arc<postgres_container::PostgresContainer>> {
+        self.container.as_ref()
+    }
+
     /// The database every session on this endpoint runs its statements against.
     #[must_use]
     pub fn database(&self) -> Arc<sql_engine::InstanceDatabase> {
@@ -598,6 +610,66 @@ pub async fn open_engine_endpoint<Eng: Send + Sync + 'static>(
         generation,
         _listener: listener,
         _reader_listener: reader_listener,
+        container: None,
+    })
+}
+
+/// fork: open the endpoint of a DB instance served by `container`
+/// ([`postgres_container`]): a listener of this emulator whose sessions are admitted
+/// against the instance's record and then passed on to the container.
+pub async fn open_postgres_container_endpoint<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    state: &::engine::ServiceState<ComAmazonawsRdsAmazonrdsv19State>,
+    target: wire_session::SessionTarget,
+    container: Arc<postgres_container::PostgresContainer>,
+    preferred_port: Option<u16>,
+) -> Result<DbEngineEndpoint, String> {
+    let listeners = shared_engine(engine)
+        .ok_or_else(|| "this emulator's engine has no listener surface".to_string())?
+        .listeners();
+    // The in-process engine serves no statement here; it is what the admission facts list
+    // the instance's databases from.
+    let database = Arc::new(sql_engine::InstanceDatabase::open().map_err(|error| {
+        format!("the SQL engine could not be started: {}", error.message)
+    })?);
+    let (generation, generation_rx) = watch::channel(0u64);
+    let sessions = pg_sessions::SessionRegistry::default();
+    let context = wire_session::SessionContext {
+        state: state.clone(),
+        target,
+        role: EndpointRole::Writer,
+        database: Arc::clone(&database),
+        sessions: sessions.clone(),
+        upgrader: listeners.tls_upgrader().map_err(|error| {
+            format!("the engine endpoint's TLS could not be prepared: {error}")
+        })?,
+        objects: None,
+        generation: generation_rx,
+        next_connection_id: Arc::new(AtomicU32::new(1)),
+    };
+    let proxy = postgres_container::PostgresContainerProxy {
+        container: Arc::clone(&container),
+        context,
+        firewall: ::service_com_amazonaws_ec2_amazonec2::state::service_state(engine),
+    };
+    let listener = match preferred_port {
+        Some(port) => listeners.tcp_plaintext_preferring(proxy, port).await,
+        None => listeners.tcp_plaintext(proxy).await,
+    }
+    .map_err(|error| format!("the engine endpoint could not be opened: {error}"))?;
+    Ok(DbEngineEndpoint {
+        endpoint: ServedEndpoint {
+            host: listener.host(),
+            port: i32::from(listener.port()),
+        },
+        reader: None,
+        wire: EngineWire::Postgres,
+        database,
+        sessions,
+        generation,
+        _listener: listener,
+        _reader_listener: None,
+        container: Some(container),
     })
 }
 

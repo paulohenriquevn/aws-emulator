@@ -461,3 +461,61 @@ mod tests {
         }
     }
 }
+
+/// fork: whether the security groups governing `address` admit a request a load balancer
+/// passes on to it on `port`, the TRAFFIC port: the same inbound rules a health check is read
+/// against ([`interface_admits_check`]), for the connection that carries the client's request.
+///
+/// `guarding` is the groups the scheduler running the workload declared; when it is empty,
+/// the groups are those of the account's network interface holding `address`. The source is
+/// the load balancer that serves the request: its groups and the addresses its own
+/// interfaces hold. `None` when the question is undecided, as for a health check: EC2 is not
+/// mounted, no interface holds the address, or a rule cannot be read.
+pub fn traffic_admitted<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    guarding: &[String],
+    source_group_ids: &[String],
+    source_interface_ids: &[String],
+    address: &str,
+    port: i32,
+) -> Option<bool> {
+    let inventory = ::service_com_amazonaws_ec2_amazonec2::state::service_state(engine)?;
+    let store = inventory.lock();
+    let groups: Vec<String> = if guarding.is_empty() {
+        store
+            .network_interfaces
+            .values()
+            .find(|interface| super::host_counts::interface_addresses_of(interface).iter().any(|held| held == address))
+            .map(super::host_counts::interface_group_ids)?
+    } else {
+        guarding.to_vec()
+    };
+    let source = CheckSource {
+        group_ids: source_group_ids.to_vec(),
+        group_names: source_group_ids
+            .iter()
+            .filter_map(|group_id| store.security_groups.get(group_id).and_then(|group| group.group_name.clone()))
+            .collect(),
+        addresses: store
+            .network_interfaces
+            .values()
+            .filter(|interface| {
+                interface
+                    .network_interface_id
+                    .as_ref()
+                    .is_some_and(|id| source_interface_ids.contains(id))
+            })
+            .flat_map(super::host_counts::interface_addresses_of)
+            .collect(),
+    };
+    let ingress: HashMap<String, Vec<ec2_types::IpPermission>> = groups
+        .iter()
+        .filter_map(|group_id| {
+            store
+                .security_groups
+                .get(group_id)
+                .map(|group| (group_id.clone(), group.ip_permissions.clone().unwrap_or_default()))
+        })
+        .collect();
+    interface_admits_check(&groups, &ingress, port, &source)
+}

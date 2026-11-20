@@ -107,6 +107,8 @@ mod tag_removal;
 mod tag_writes;
 #[path = "all/unsigned_query_calls.rs"]
 mod unsigned_query_calls;
+#[path = "all/target_forwarding.rs"]
+mod target_forwarding;
 #[path = "all/target_deregistration_and_health_spans.rs"]
 mod target_deregistration_and_health_spans;
 #[path = "all/target_group_attribute_writes.rs"]

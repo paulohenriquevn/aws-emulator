@@ -71,12 +71,15 @@
 //! balancer's own `502` when that answer breaks the response contract
 //! ([`super::lambda_target`]).
 //!
-//! A `forward` to any other target group names targets this emulator has no server behind: a
-//! registered target is an instance id or an address, and nothing in this emulator listens
-//! on it. Neither a body nor a status is invented for a backend that never ran, so such a
-//! forward is answered the way a load balancer answers those two conditions —
-//! [`NO_HEALTHY_TARGET_STATUS`] when the group has no target to send the request to, and
-//! [`TARGET_UNREACHABLE_STATUS`] when it has one and the connection to it cannot be made.
+//! fork: a `forward` to an `instance` or `ip` target group IS performed too: the request is
+//! passed on over HTTP/1.1 to the chosen target's address (an `ip` target's own, or the
+//! private address EC2 holds for an `instance` target) and the client is answered with what
+//! the target answered ([`super::target_proxy`]). Neither a body nor a status is invented
+//! for a backend that does not answer, so the load balancer's own statuses stand for the
+//! conditions it reports: [`NO_HEALTHY_TARGET_STATUS`] when the group has no target to send
+//! the request to, [`TARGET_UNREACHABLE_STATUS`] when the connection to the one it chose
+//! cannot be made, and [`super::target_proxy::TARGET_TIMEOUT_STATUS`] when that target does
+//! not answer in time.
 //!
 //! An `authenticate-oidc`, `authenticate-cognito` or `jwt-validation` action needs the
 //! identity provider it names, and this emulator makes no outbound connection to one, so
@@ -794,6 +797,19 @@ pub async fn serve<Eng: Send + Sync + 'static>(
                     };
                     super::lambda_target::served(ctx, &forwarded, &request, body).await
                 }
+                // fork: the store's guard is released above, so the target is dialled with
+                // no lock of this service's held.
+                Performed::Proxy(proxied) => {
+                    let Some(body) = req.body().bytes() else {
+                        tracing::warn!(
+                            load_balancer = %load_balancer_arn,
+                            "the request carries a body this emulator cannot read, so the \
+                             target was not reached"
+                        );
+                        return rendered(&Served::status(TARGET_UNREACHABLE_STATUS));
+                    };
+                    super::target_proxy::served(engine, &proxied, &request, body).await
+                }
             }
         }
     };
@@ -1139,6 +1155,10 @@ enum Performed {
     /// The action forwards to a `lambda` target group, so the client is answered from an
     /// INVOCATION of the function registered with it ([`super::lambda_target`]).
     Invoke(Box<super::lambda_target::Forwarded>),
+    /// fork: the action forwards to an `instance` or `ip` target group, so the request is
+    /// PASSED ON to the chosen target and the client is answered with what it answered
+    /// ([`super::target_proxy`]).
+    Proxy(Box<super::target_proxy::Proxied>),
 }
 
 /// Perform the matched action list: the terminating action answers the client, and an
@@ -1441,11 +1461,49 @@ fn forward(
             }),
         }));
     }
-    tracing::warn!(
-        "the target group's healthy target is a registration with no server of this \
-         emulator's behind it, so the connection to it cannot be made"
-    );
-    Performed::Answered(Served::status(TARGET_UNREACHABLE_STATUS))
+    // fork: an `instance` or `ip` target is dialled ([`super::target_proxy`]).
+    let Some(port) = registered_port(group, target.port) else {
+        tracing::warn!(
+            target_group = %group.arn,
+            "the chosen target has no port to receive traffic on, so the connection to it \
+             cannot be made"
+        );
+        return Performed::Answered(Served::status(TARGET_UNREACHABLE_STATUS));
+    };
+    let address = if group.target_type == "instance" {
+        super::target_proxy::TargetAddress::Instance(target.id.clone())
+    } else {
+        super::target_proxy::TargetAddress::Address(target.id.clone())
+    };
+    // The load balancer serving this request is where the connection to the target comes
+    // from, as the target's inbound rules name it.
+    let serving = store.load_balancers.get(&listener.load_balancer_arn);
+    Performed::Proxy(Box::new(super::target_proxy::Proxied {
+        target: address,
+        port,
+        target_protocol: group.protocol.clone(),
+        listener_protocol: listener.protocol.clone(),
+        listener_port: listener.port,
+        target_group_arn: group.arn.clone(),
+        guarding_group_ids: target.guarded_by.to_vec(),
+        source_group_ids: serving.map(|lb| lb.security_groups.clone()).unwrap_or_default(),
+        source_interface_ids: serving.map(|lb| lb.network_interface_ids.clone()).unwrap_or_default(),
+        set_cookie: (distribution.sticky && pinned.is_none()).then(|| {
+            super::target_group_selection::set_cookie(
+                &group.arn,
+                distribution.sticky_duration_seconds,
+            )
+        }),
+    }))
+}
+
+/// fork: the port a registration receives traffic on: its own, else its group's, as a TCP
+/// port. `None` when neither names one in range.
+fn registered_port(group: &TargetGroupRecord, target_port: Option<i32>) -> Option<u16> {
+    target_port
+        .or(group.port)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
 }
 
 /// Whether the load balancer may send this registration a request: its reported health says

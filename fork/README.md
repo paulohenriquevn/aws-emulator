@@ -14,6 +14,7 @@ account. Everything the fork adds lives in this directory, plus a few patches in
 | `console/` | The read-only web console the binary serves at `/_console/`: a React app in `console/web` and the crate that embeds its build. |
 | `acceptance/` | Eight Terraform fixtures (billing, compute, data, edge, network, operations, registry, security) and `run.sh`, which runs each one against a fresh emulator. |
 | `service-account-issuers/` | The route that registers a Kubernetes cluster's service account key set for an EKS cluster of the emulator. |
+| `iam-gate/` | Judges every signed call against the caller's IAM policies when `EMULATOR_IAM_ENFORCE=on` (see IAM on every service). |
 | `access-log/` | Logs one line per request the binary answers (`RUST_LOG=info,access=debug`): the operation, its status and error code, and how long it took. |
 | `kubernetes/` | `run.sh`, which runs real in-cluster controllers and workload identity in a kind cluster against the emulator, with the manifests and chart values it applies. |
 
@@ -89,8 +90,11 @@ authentication on, the route takes only requests signed with the emulator's own 
 | Check | Passes when |
 |---|---|
 | `irsa` | A pod whose service account is annotated with a role is that role (`sts get-caller-identity`). |
+| `iam-enforced` | The IRSA probe's role allows only `sts:GetCallerIdentity`, and EC2 refuses its `DescribeVpcs` with `UnauthorizedOperation`. |
 | `pod-identity` | A pod whose service account has a pod identity association gets the role's credentials from the EKS Pod Identity Agent. |
-| `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with the kind node's instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target). |
+| `node-group` | The EKS managed node group's instances are the kind workers: `kubectl get nodes` lists one worker per instance, each `providerID` naming its instance, and the workers are `Ready`. |
+| `load-balancer` | The AWS Load Balancer Controller, on IRSA, turns an Ingress into an ALB in the emulator with every node group instance registered as a target (instance targets: a kind pod has no VPC network interface for an IP target), every target healthy, and a request to the ALB's name answered by the echo pod's nginx. |
+| `database` | A pod runs `select 1` with `psql` over TLS on an RDS for PostgreSQL instance (a real PostgreSQL container) whose security group admits the nodes' groups on its port, and gets `1`; on an instance whose group has no inbound rule, the connection is closed. |
 | `external-secrets` | External Secrets, on IRSA, copies a Secrets Manager secret into a Kubernetes Secret. |
 | `opencost` | OpenCost reports the node's hourly cost as the emulator's on-demand price for its instance type. |
 
@@ -109,9 +113,126 @@ never report the load balancer. Without sockets the load balancer publishes
 `<name>-<id>.<region>.elb.amazonaws.com` and is served at the emulator's endpoint for a request
 whose `Host` is that name.
 
+The ALB passes that request on to its target (`target_proxy.rs`, below). For the target to be
+reachable, the kind node runs on a Docker network of its own (`aws-emulator-kind`,
+`172.29.0.0/16`, override with `KIND_NETWORK` and `KIND_NETWORK_CIDR`) that is also the EKS
+cluster's VPC. The node's EC2 instance is launched at `172.29.100.10` before kind starts, so
+kubelet registers the node with that instance as its `providerID` (the API server lets a
+`providerID` be set only from empty, and kind sets one of its own otherwise). That address is then
+added to the node container's interface. Docker hands out addresses of `172.29.1.0/24` only, so
+it never gives the instance's address to a container.
+
+The harness also creates a managed node group of two `t3.medium` nodes. `CreateNodegroup`
+launches the instances in EC2 (below), and each one becomes a kind worker the same way: its
+`providerID`, zone and `eks.amazonaws.com/nodegroup` label in `kind.yaml`, and its private address
+added to the worker container's interface. The control-plane node keeps the instance launched
+above.
+
+Each node also sends its traffic to the emulator from the instance's address: its own through
+a route (`ip route add <gateway>/32 src <instance address>`), its pods' TCP through a SNAT rule
+ahead of kind's masquerade, which would otherwise pick the node's Docker address. A connection
+from the node or a pod then arrives from the address an ENI of the account holds, as from an
+EKS node. The security groups of an
+RDS or ElastiCache endpoint then judge the node instance's groups (see "Security groups on
+database endpoints"). The harness runs RDS with `EMULATOR_RDS_BACKEND=docker`.
+
+With `KEEP_CLUSTER=1` the emulator and the cluster stay up after the checks, and
+`$KUBERNETES_WORK/environment.sh` holds what a consumer needs to keep working on them: the AWS
+CLI's endpoint, CA and credentials, `KUBECONFIG`, the EKS cluster's name and issuer, the VPC,
+its subnets and the node instances' security groups. Name the checks a consumer needs, such
+as `run.sh <binary> load-balancer`, to install only what they install.
+
 It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git, and network
 access for images and charts. The emulator listens on the gateway of kind's Docker network
 (`-b`), and every pod that calls it mounts its CA. The `kubernetes` job of the workflow runs it.
+
+## IAM on every service
+
+Upstream asks IAM only from IAM itself, Secrets Manager, ACM and part of KMS; every other service
+serves any signed call. With `EMULATOR_IAM_ENFORCE=on`, the router asks the caller's
+identity-based policies (and permissions boundary) about every call, after request authentication
+and before the operation runs (`iam-gate/`). The action is `<IAM prefix>:<operation>`: the signing
+name, with `monitoring` read as `cloudwatch`, and S3 operations mapped to the action IAM checks
+(`ListObjectsV2` and `HeadBucket` to `s3:ListBucket`, `HeadObject` to `s3:GetObject`). A refusal
+is a 403 in the service's protocol: `UnauthorizedOperation` for EC2, `AccessDeniedException` for
+the JSON protocols and `AccessDenied` for the others.
+
+The decision is simulated at the action level, because the router does not know which resource a
+request addresses or what its condition keys would hold. An `Allow` counts for every action it
+names, whatever its `Resource` and `Condition`. A `Deny` counts only on `"Resource": "*"` without
+a condition. A role missing an action is refused, and a role whose grant is scoped by ARN or tag
+(as the AWS Load Balancer Controller's policy is) is not refused by mistake. A scoped `Deny` is
+not applied at all.
+
+Not asked about: the account's own credential (the emulator's administrator), an unsigned
+request, a call one emulated service makes into another, a principal holding an AWS managed
+policy the emulator does not carry, and IAM, STS, Secrets Manager and ACM, which authorize their
+own calls. `fork/kubernetes/run.sh` turns the gate on and gives each role the policy its
+controller documents.
+
+## Real PostgreSQL for RDS
+
+With `EMULATOR_RDS_BACKEND=docker`, `CreateDBInstance` for engine `postgres` starts a
+`postgres:<major version>` container (`EngineVersion=16.6` runs `postgres:16`; no version runs
+`postgres:17`) with the master user, its password (the request's, or the one RDS generated for
+the managed secret) and `DBName`. `EMULATOR_RDS_POSTGRES_IMAGE` replaces the `postgres`
+repository, for a mirror. The emulator needs `docker` on its `PATH` and access to the Docker
+daemon. `fork/acceptance/run.sh` turns the backend on.
+
+The published `Endpoint` is still the emulator's own listener, so the configured `Port`, the
+instance status and TLS stay the emulator's. The listener answers `SSLRequest` with the
+emulator's certificate, which the emulator CA bundle verifies. It refuses a session while the
+instance is not `available`, and a plaintext session while `rds.force_ssl` is on (the default
+from PostgreSQL 15), with PostgreSQL's own errors. It then passes the session on to the
+container, which listens on loopback only. A reboot or a stop closes the open sessions,
+`ModifyDBInstance` with `MasterUserPassword` (or a rotation of the managed secret) changes the
+password in the server, and `DeleteDBInstance` removes the container. Containers carry the label
+`aws-emulator.service=rds`, so `docker rm -f $(docker ps -aq --filter label=aws-emulator.service=rds)`
+removes the ones an emulator that was killed left behind.
+
+Read replicas, instances restored from a snapshot, members of a DB cluster and MySQL instances
+still use the in-process engine. Data lives in the container and is lost with it: a snapshot does
+not copy it. A session waits up to 30 seconds for a container that is still starting (the first
+start pulls the image) and is then refused as a server that is starting up.
+
+Upstream's engine contract (`vendor/engine/src/lib.rs`) says a generated emulator runs no
+containers or external processes and connects to no other host. This backend breaks that on
+purpose, and only when the variable is set. The ALB target proxy makes the same kind of
+exception: it connects to the registered targets.
+
+## Real Valkey and Redis OSS for ElastiCache
+
+With `EMULATOR_ELASTICACHE_BACKEND=docker`, a replication group with cluster mode disabled and a
+standalone cache cluster of engine `valkey` or `redis` start a container of that engine and major
+version (`EngineVersion=8.0` runs `valkey/valkey:8`; Redis OSS runs `redis:<major>`). `AuthToken`
+becomes the server's `requirepass`, so a command sent before `AUTH` gets the server's own
+`NOAUTH` error. The emulator needs `docker` on its `PATH`. `fork/acceptance/run.sh` turns the
+backend on, and the `data` fixture writes and reads a value over TLS.
+
+The group's primary and reader endpoints, and the endpoint of every node, become an emulator
+listener on the emulator's host, which passes each connection on to the container (loopback
+only). The listener takes the cache's `Port` (6379 by default) when it is free, on another
+loopback address when 127.0.0.1 already serves it, so the Terraform AWS provider reads back the
+port it set. With `TransitEncryptionEnabled` the listener runs TLS with the emulator's certificate from
+the first byte. Deleting the group or the cluster removes the container; containers carry the
+label `aws-emulator.service=elasticache`.
+
+One container serves a whole group, so the reader endpoint reads from the primary and there is
+no replication or failover between nodes. Cluster mode enabled groups, serverless caches and
+Memcached keep the metadata-only behavior. The emulator closes a connection idle for 300
+seconds, which a client's connection pool has to reconnect from.
+
+## Security groups on database endpoints
+
+A container-backed RDS or ElastiCache endpoint applies the DB instance's or the cache's VPC
+security groups to each connection, by its source address. A replication group's groups are its
+member clusters', read when the connection arrives. When a network interface of the account
+holds that address, its security groups and the address are the source the inbound rules are
+read against, on the instance's or the cache's port; a connection no rule admits is closed
+before anything is read from it. A source no network interface holds, such as a client on the
+emulator's host, is let through, and so is a connection to an instance or cache whose groups EC2
+does not hold. The core passes the source address to native listeners through
+`emulator_server::connection_peer()`.
 
 ## Known limits
 
@@ -134,13 +255,20 @@ upstream ships the fix.
 | SSM | EKS optimized AL2023 AMI parameters | aws/aws-emulator#535 |
 | TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |
 | RDS (and core listeners) | An instance created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves it, so `Endpoint.Port` matches it | aws/aws-emulator#537 |
+| Core router | `MultiServiceRouter` runs an installed `RequestAuthorizer` after request authentication (`vendor/smithy-server-runtime/src/multi_service_router.rs`), which `iam-gate/` installs | not reported yet |
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |
 | Elastic Load Balancing v2 | `DescribeTags`, `AddTags` and `RemoveTags` accept a listener's default rule, which `DescribeRules` reports | not reported yet |
+| ElastiCache | `EMULATOR_ELASTICACHE_BACKEND=docker` serves a Valkey or Redis OSS group or cluster from a real server in a container (`src/state/redis_container.rs`) | not reported yet |
+| Elastic Load Balancing v2 | A `forward` to an `instance` or `ip` target group passes the request on to the target over HTTP/1.1 (`src/service/target_proxy.rs`) instead of answering 502 | not reported yet |
+| Elastic Load Balancing v2 | An `HTTPS` target group is reached over TLS without validating the target's certificate, and a forwarded request answers 502 when no inbound rule of the target's security groups admits the load balancer on the traffic port (`src/service/target_proxy.rs`, `traffic_admitted` in `src/state/health_check_firewall.rs`) | not reported yet |
+| RDS | `EMULATOR_RDS_BACKEND=docker` serves a PostgreSQL DB instance with a real PostgreSQL server in a container (`src/state/data_plane/postgres_container.rs`) | not reported yet |
 | Elastic Load Balancing v2 | `EMULATOR_ELB_LISTENER_SOCKETS=off` makes an Application Load Balancer publish an `elb.amazonaws.com` name instead of a socket's `host:port` | not reported yet |
 | Elastic Load Balancing v2 | An unsigned form `POST /` on the emulator's endpoint (STS `AssumeRoleWithWebIdentity`) is not claimed as load balancer traffic, so it no longer answers `500 AmbiguousService` beside an ALB with a rule for `/` | not reported yet |
 | STS | `GetCallerIdentity` reports EKS Pod Identity credentials as the associated role's session (`assumed-role/<role>/eks-...`) | not reported yet |
 | EKS Auth | `AssumeRoleForPodIdentity` serves an EKS cluster of the emulator whose tokens a registered external Kubernetes cluster signs | not reported yet |
+| EKS | `CreateNodegroup` launches `desiredSize` EC2 instances of the Amazon EKS optimized AL2023 AMI over the node group's subnets, tagged `eks:cluster-name` and `eks:nodegroup-name`, and `DeleteNodegroup` terminates them (`src/state/nodegroup_instances.rs`). No Auto Scaling group is created, and `UpdateNodegroupConfig` launches or terminates nothing | not reported yet |
+| RDS, ElastiCache (and core listeners) | A container-backed endpoint closes a connection its VPC security groups do not admit (RDS `src/state/data_plane/postgres_container.rs`, ElastiCache `src/state/redis_container.rs`, EC2 `src/state/connection_firewall.rs`, `vendor/server/src/listeners.rs`) | not reported yet |
 | Price List | EC2 instance products carry the `marketoption` attribute (`OnDemand`) | not reported yet |
 | EC2 | Each state an instance moves into is published on EventBridge as an `EC2 Instance State-change Notification`, including the states the clock moves it into | [aws/aws-emulator#549](https://github.com/aws/aws-emulator/issues/549) |
 

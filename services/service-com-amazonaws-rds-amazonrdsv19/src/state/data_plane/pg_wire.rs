@@ -37,12 +37,12 @@ use super::wire_session::{
 use super::EngineWire;
 
 /// The protocol version a 3.0 client sends in its startup message.
-const PROTOCOL_VERSION_3: i32 = 196_608;
+pub(super) const PROTOCOL_VERSION_3: i32 = 196_608;
 
 /// The startup codes that are requests rather than a startup message.
-const SSL_REQUEST_CODE: i32 = 80_877_103;
-const GSSENC_REQUEST_CODE: i32 = 80_877_104;
-const CANCEL_REQUEST_CODE: i32 = 80_877_102;
+pub(super) const SSL_REQUEST_CODE: i32 = 80_877_103;
+pub(super) const GSSENC_REQUEST_CODE: i32 = 80_877_104;
+pub(super) const CANCEL_REQUEST_CODE: i32 = 80_877_102;
 
 /// How many bytes one protocol message may carry. The protocol allows far more; this is
 /// what this endpoint serves, so a length prefix cannot make it allocate without bound.
@@ -1126,7 +1126,7 @@ const PG_STAT_SSL_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS pg_stat_ssl (\
 ///
 /// Each one is the server's own wording for that refusal, with the values — the user, the
 /// database, the host — taken from the request and from this instance's state.
-fn refusal_sentence(
+pub(super) fn refusal_sentence(
     refusal: &LoginRefusal,
     facts: &wire_session::InstanceFacts,
     user: &str,
@@ -1260,7 +1260,7 @@ async fn message_response(
 }
 
 /// Report a refusal that ends the connection, which is what a `FATAL` is.
-async fn fatal(
+pub(super) async fn fatal(
     conn: &mut ::emulator_server::ListenerConn,
     code: &str,
     message: &str,
@@ -1323,7 +1323,7 @@ async fn read_message(
 
 /// Read a startup message or request: its length and the body that follows it. The
 /// startup messages are the only ones with no type byte.
-async fn read_startup(conn: &mut ::emulator_server::ListenerConn) -> std::io::Result<Vec<u8>> {
+pub(super) async fn read_startup(conn: &mut ::emulator_server::ListenerConn) -> std::io::Result<Vec<u8>> {
     let mut length = [0u8; 4];
     conn.read_exact(&mut length).await?;
     let length = i32::from_be_bytes(length);
@@ -1355,7 +1355,7 @@ fn too_large() -> std::io::Error {
 
 /// The key/value pairs a startup message carries, each NUL-terminated and the list ended
 /// by an empty key.
-fn startup_parameters(body: &[u8]) -> Vec<(String, String)> {
+pub(super) fn startup_parameters(body: &[u8]) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
     let mut at = 0usize;
     while at < body.len() {

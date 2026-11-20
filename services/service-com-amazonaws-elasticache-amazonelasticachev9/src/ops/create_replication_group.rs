@@ -1308,6 +1308,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // owes it `available` once the transition span has passed. The response
         // is read back out of the store, so it reports what was persisted.
         store.insert_replication_group(new);
+        // fork: a cluster mode disabled Redis OSS or Valkey group is served by a container
+        // when the backend is on (`crate::state::redis_container`).
+        if crate::state::redis_container::docker_backend_configured() {
+            if let Some(group) = store.replication_groups.get(&replication_group_id) {
+                if !group.cluster_enabled && crate::state::redis_container::serves_engine(&group.engine) {
+                    crate::state::redis_container::serve_in_background(
+                        ::std::sync::Arc::clone(&self.engine),
+                        state.clone(),
+                        crate::state::redis_container::ServedCache {
+                            id: replication_group_id.clone(),
+                            engine: group.engine.clone(),
+                            engine_version: Some(group.engine_version.clone()),
+                            password: input.auth_token.clone(),
+                            transit_encryption: group.transit_encryption_enabled,
+                            port: group.port,
+                        },
+                    );
+                }
+            }
+        }
         let Some(replication_group) = store.modeled_replication_group(&replication_group_id) else {
             return Err(crate::scaffolded::Scaffolded::validation(
                 crate::state::STORE_UNAVAILABLE,

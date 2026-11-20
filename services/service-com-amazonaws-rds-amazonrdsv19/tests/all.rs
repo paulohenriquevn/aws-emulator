@@ -272,6 +272,8 @@ mod pagination_marker_positions;
 mod parameter_group_and_snapshot_copies;
 #[path = "all/parameter_refusal_codes.rs"]
 mod parameter_refusal_codes;
+#[path = "all/postgres_container.rs"]
+mod postgres_container;
 #[path = "all/postgres_rds_namespace_parameters.rs"]
 mod postgres_rds_namespace_parameters;
 #[path = "all/published_catalog_creates.rs"]

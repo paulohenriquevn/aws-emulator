@@ -72,7 +72,10 @@ start_emulator() {
   if [[ -n $IMAGE ]]; then start_container "$@"; return; fi
   local home=$1
   mkdir -p "$home"
-  HOME=$home "$BIN" -p "$PORT" --telemetry off >"$home/emulator.log" 2>&1 &
+  # RDS for PostgreSQL and ElastiCache for Valkey and Redis OSS run real servers in
+  # containers (fork/README.md).
+  HOME=$home EMULATOR_RDS_BACKEND=${EMULATOR_RDS_BACKEND:-docker} \
+    EMULATOR_ELASTICACHE_BACKEND=${EMULATOR_ELASTICACHE_BACKEND:-docker} "$BIN" -p "$PORT" --telemetry off >"$home/emulator.log" 2>&1 &
   EMU_PID=$!
   local ca=$home/.aws/emulator/$PORT/ca.pem
   for _ in $(seq 60); do

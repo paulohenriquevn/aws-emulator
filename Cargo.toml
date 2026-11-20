@@ -3,6 +3,7 @@ members = [
     "fork/console",
     "fork/service-account-issuers",
     "fork/access-log",
+    "fork/iam-gate",
     "fork/router",
     "services/service-com-amazonaws-accessanalyzer-accessanalyzer",
     "services/service-com-amazonaws-account-account",
@@ -932,6 +933,7 @@ emulator-paths = { path = "vendor/emulator-paths", package = "aws-emulator-emula
 aws-emulator-fork-console = { path = "fork/console" }
 aws-emulator-fork-service-account-issuers = { path = "fork/service-account-issuers" }
 aws-emulator-fork-access-log = { path = "fork/access-log" }
+aws-emulator-fork-iam-gate = { path = "fork/iam-gate" }
 
 # Public crates.io deps
 aws-smithy-schema = "0.2.1"

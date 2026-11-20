@@ -873,6 +873,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the store's guard released — minting is a call to another service of this
         // emulator — and after every refusal above has been answered, so a create that was
         // going to fail mints no secret.
+        // fork: the master password in the clear, for a PostgreSQL container to be started
+        // with ([`crate::state::data_plane::postgres_container`]); held only for this call.
+        let mut container_password: Option<String> = input.master_user_password.clone();
         if manage_master_user_password {
             let minted = crate::state::mint_master_user_secret(
                 &*self.engine,
@@ -902,6 +905,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     &minted.password,
                 )
             });
+            container_password = Some(minted.password.clone());
             record.master_user_secret = Some(minted.secret);
         }
         // The instance's own ENGINE ENDPOINT, opened with the state lock released:
@@ -954,8 +958,46 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }
             }),
         };
-        let endpoint = match plan {
-            Some(plan) => Some(
+        // fork: with the container backend on, a PostgreSQL instance that runs its own
+        // engine is served by a real PostgreSQL server.
+        let container = match (&plan, &record.master_username, container_password) {
+            (
+                Some(crate::state::EngineEndpointPlan {
+                    target: crate::state::SessionTarget::DbInstance { .. },
+                    wire: crate::state::EngineWire::Postgres,
+                    ..
+                }),
+                Some(username),
+                Some(password),
+            ) if crate::state::data_plane::postgres_container::docker_backend_configured() => {
+                use crate::state::data_plane::postgres_container as pg;
+                let repository = std::env::var(pg::IMAGE_ENV)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| pg::DEFAULT_IMAGE_REPOSITORY.to_string());
+                Some(pg::PostgresContainer::start(pg::ContainerSpec {
+                    name: pg::container_name(&record.dbi_resource_id),
+                    image: pg::image_for(&repository, record.engine_version.as_deref()),
+                    master_username: username.clone(),
+                    master_password: password,
+                    database: record.db_name.clone(),
+                }))
+            }
+            _ => None,
+        };
+        let endpoint = match (plan, container) {
+            (Some(plan), Some(container)) => Some(
+                crate::state::data_plane::open_postgres_container_endpoint(
+                    &*self.engine,
+                    &state,
+                    plan.target,
+                    container,
+                    plan.preferred_port,
+                )
+                .await
+                .map_err(CreateDBInstanceError::internal_failure)?,
+            ),
+            (Some(plan), None) => Some(
                 crate::state::open_engine_endpoint(&*self.engine, &state, plan)
                     .await
                     .map_err(CreateDBInstanceError::internal_failure)?,
@@ -963,7 +1005,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // An engine whose native wire this emulator does not speak: no listener is
             // opened and the instance keeps the DNS-form endpoint this service has always
             // reported for it, rather than publishing a port that would answer nothing.
-            None => None,
+            (None, _) => None,
         };
         record.served_endpoint = endpoint
             .as_ref()

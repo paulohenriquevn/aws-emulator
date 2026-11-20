@@ -412,6 +412,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-emulator-fork-iam-gate"
+version = "0.1.0"
+dependencies = [
+ "aws-emulator-engine",
+ "aws-emulator-server",
+ "aws-emulator-smithy-server-runtime",
+ "http",
+ "serde_json",
+ "service-com-amazonaws-iam-awsidentitymanagementv20100508",
+ "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
+ "service-common",
+ "tracing",
+]
+
+[[package]]
 name = "aws-emulator-fork-router"
 version = "0.1.0"
 dependencies = [
@@ -419,6 +434,7 @@ dependencies = [
  "aws-emulator-engine",
  "aws-emulator-fork-access-log",
  "aws-emulator-fork-console",
+ "aws-emulator-fork-iam-gate",
  "aws-emulator-fork-service-account-issuers",
  "aws-emulator-server",
  "aws-emulator-smithy-server-runtime",
@@ -12570,6 +12586,7 @@ dependencies = [
  "bytes",
  "hex",
  "http",
+ "rustls",
  "serde_json",
  "service-com-amazonaws-ec2-amazonec2",
  "service-com-amazonaws-kms-trentservice",
@@ -12579,6 +12596,7 @@ dependencies = [
  "service-common",
  "sha2 0.10.9",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
@@ -17264,6 +17282,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-schema 0.2.1",
  "aws-smithy-types",
+ "base64 0.22.1",
  "bigdecimal",
  "bytes",
  "chrono",
@@ -17271,6 +17290,7 @@ dependencies = [
  "form_urlencoded",
  "getrandom 0.3.4",
  "hex",
+ "hmac 0.12.1",
  "http",
  "md-5 0.10.6",
  "parquet",

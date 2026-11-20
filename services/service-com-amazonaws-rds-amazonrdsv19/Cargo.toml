@@ -16,7 +16,8 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
+# fork: `process` and `rt` run the PostgreSQL containers (`src/state/data_plane/postgres_container.rs`).
+tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "process", "rt"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -141,11 +142,20 @@ parquet = { version = "60", default-features = false, features = ["flate2-rust_b
 csv = "1"
 form_urlencoded = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+# fork: a container-backed endpoint reads the account's security groups and network
+# interfaces from EC2's store to admit or refuse a connection by its source address
+# (`src/state/data_plane/postgres_container.rs`). The upstream crate takes EC2 only in its
+# tests; the fork takes it here as Elastic Load Balancing v2 does.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
+# fork: the PostgreSQL container suite (`tests/postgres_container.rs`) logs in with
+# SCRAM-SHA-256, as libpq does.
+hmac = "0.12"
+base64 = "0.22"
 # The EC2 service, mounted beside this one in the test harness: that a DB subnet group
 # reports the zones of the subnets a client minted with `ec2:CreateSubnet` can only be
 # driven end to end with the owner of subnets on the same engine. DEV-ONLY: this crate

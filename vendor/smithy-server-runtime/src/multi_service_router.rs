@@ -42,6 +42,26 @@ pub struct MultiServiceRouter {
     /// The base URL every URL this router hands out names, shared by every clone and every
     /// `UrlSigner` it made: `UNSERVED_URL_BASE` until `serving_at` or `set_url_base`.
     pub(crate) url_base: std::sync::Arc<crate::endpoint::UrlBase>,
+    /// fork: the authorization step run after authentication, when one is installed.
+    authorizer: Option<std::sync::Arc<dyn RequestAuthorizer>>,
+}
+
+/// fork: decides whether the caller a request speaks for may perform the operation it
+/// names, after request authentication accepted it and before the operation runs.
+///
+/// `operation` is the operation's name as the service's protocol routes it (the `Action`
+/// field, the `X-Amz-Target` suffix, or the REST route's operation), and `signing_name` the
+/// claiming service's SigV4 signing name. A refusal is a 403 with the `Denied` code and
+/// message, rendered in the service's own protocol. A call one emulated service makes into
+/// another on a caller's behalf is not asked about.
+pub trait RequestAuthorizer: Send + Sync {
+    fn authorize(
+        &self,
+        parts: &http::request::Parts,
+        credential_store: &CredentialStore,
+        signing_name: &str,
+        operation: &str,
+    ) -> Result<(), Denied>;
 }
 
 impl MultiServiceRouter {
@@ -88,6 +108,13 @@ impl MultiServiceRouter {
         if enabled {
             self.register_authenticator(SigV4Authenticator::for_this_process());
         }
+        self
+    }
+
+    /// fork: install the authorization step every top-level request passes after
+    /// authentication ([`RequestAuthorizer`]).
+    pub fn set_request_authorizer(&mut self, authorizer: std::sync::Arc<dyn RequestAuthorizer>) -> &mut Self {
+        self.authorizer = Some(authorizer);
         self
     }
 
@@ -258,6 +285,20 @@ impl MultiServiceRouter {
         let admitted = refuse_cross_site_browsers(&parts);
         let admitted =
             admitted.and_then(|()| self.authenticate(svc, wire, op, &rt_req, &parts, &_body));
+        // fork: authorization of the authenticated caller, for a request a client made (a
+        // callback between services carries a recursion depth and is not asked about).
+        let admitted = admitted.and_then(|()| match (&self.authorizer, recursion_depth) {
+            (Some(authorizer), 0) => match wire.protocol().routing_key(&rt_req) {
+                Ok(operation) => authorizer.authorize(
+                    &parts,
+                    &self.credential_store,
+                    svc.definition().identity().signing_name(),
+                    operation,
+                ),
+                Err(_) => Ok(()),
+            },
+            _ => Ok(()),
+        });
         if let Err(denied) = admitted {
             let (code, message) = (denied.code, denied.message);
             let err = aws_smithy_schema_server::ProtocolError::Unauthenticated { code, message };

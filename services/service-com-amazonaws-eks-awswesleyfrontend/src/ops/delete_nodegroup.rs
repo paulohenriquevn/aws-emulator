@@ -161,6 +161,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = SystemTime::now();
+        // fork: the client the node group's instances are terminated through, built before
+        // the store's guard is taken (`crate::state::nodegroup_instances`).
+        let launcher = state::nodegroup_instances::node_launcher(ctx, &region);
         let mut guard = store.lock();
         guard.materialize_due_transitions(now);
 
@@ -205,6 +208,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         record.active_at = None;
         record.pending_config = None;
         record.modified_at = now;
+        if let Some(launcher) = launcher {
+            launcher.terminate(record.cluster_name.clone(), record.nodegroup_name.clone());
+        }
 
         Ok(DeleteNodegroupOutput {
             nodegroup: Some(record.to_nodegroup()),
