@@ -7,6 +7,9 @@ name: fork acceptance
 on:
   pull_request:
     branches: [develop, main]
+  # A version tag runs everything, then publishes the binary the run tested (job release).
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       emulator-run-id:
@@ -263,3 +266,43 @@ jobs:
             ${{ runner.temp }}/kubernetes/*.json
             ${{ runner.temp }}/kubernetes/diagnostics/
           if-no-files-found: ignore
+
+  release:
+    # Publishes, for a version tag, the emulator binary this run built and both jobs tested,
+    # with its SHA-256, on the GitHub release of that tag. The notes are the version's section
+    # of fork/CHANGELOG.md.
+    needs: [acceptance, kubernetes]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.acceptance.result == 'success' && needs.kubernetes.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Fetch the tested emulator binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: aws-emulator-fork-linux-x64
+          path: dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mv dist/aws-emulator-fork dist/aws-emulator-fork-linux-x64
+          (cd dist && sha256sum aws-emulator-fork-linux-x64 >aws-emulator-fork-linux-x64.sha256)
+          version=${TAG#v}
+          awk -v heading="## [$version]" 'index($0, heading) == 1 {found = 1; next} found && /^## \[/ {exit} found {print}' \
+            fork/CHANGELOG.md >notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "fork/CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/aws-emulator-fork-linux-x64 dist/aws-emulator-fork-linux-x64.sha256 --clobber
+          else
+            gh release create "$TAG" dist/aws-emulator-fork-linux-x64 dist/aws-emulator-fork-linux-x64.sha256 \
+              --title "$TAG" --notes-file notes.md --verify-tag
+          fi

@@ -20,6 +20,9 @@
 #                              an ALB in the emulator, with every node group instance a
 #                              healthy target, and a request to the ALB's name reaches the
 #                              echo pod
+#        database              a pod reaches an RDS for PostgreSQL instance (a real
+#                              PostgreSQL container) whose security group admits the nodes,
+#                              and one whose group does not admit them closes the connection
 #        external-secrets      External Secrets (IRSA) copies a Secrets Manager secret into
 #                              a Kubernetes Secret
 #        opencost              OpenCost prices the node from the emulator's EC2 price list
@@ -39,7 +42,7 @@ fi
 BIN=$(realpath "$BIN")
 shift
 CHECKS=("$@")
-[[ ${#CHECKS[@]} -gt 0 ]] || CHECKS=(irsa iam-enforced pod-identity node-group load-balancer external-secrets opencost)
+[[ ${#CHECKS[@]} -gt 0 ]] || CHECKS=(irsa iam-enforced pod-identity node-group load-balancer database external-secrets opencost)
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${KUBERNETES_WORK:-$(mktemp -d)}
@@ -77,6 +80,8 @@ POD_IDENTITY_AGENT_COMMIT=ff8532e7579cc6691d6319e818f13bdfefeeb83c
 WEBHOOK_IMAGE=amazon/amazon-eks-pod-identity-webhook:latest
 AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.37.8
 FILE_SERVER_IMAGE=nginx:1.29.3-alpine
+PSQL_IMAGE=postgres:16.11-alpine
+DATABASE_PASSWORD=probe-Secret-42
 
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE
 export KUBECONFIG=$WORK/kubeconfig
@@ -125,7 +130,7 @@ mkdir -p "$EMU_HOME"
 # accepts as a hostname; a socket's host:port is refused there.
 # EMULATOR_IAM_ENFORCE=on: every call a pod makes is judged against its role's policies
 # (fork/iam-gate), so each role below carries the policy its controller documents.
-RUST_LOG=${EMULATOR_LOG:-info,access=debug} EMULATOR_IAM_ENFORCE=${EMULATOR_IAM_ENFORCE:-on} EMULATOR_ELB_LISTENER_SOCKETS=off EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
+RUST_LOG=${EMULATOR_LOG:-info,access=debug} EMULATOR_IAM_ENFORCE=${EMULATOR_IAM_ENFORCE:-on} EMULATOR_RDS_BACKEND=${EMULATOR_RDS_BACKEND:-docker} EMULATOR_ELB_LISTENER_SOCKETS=off EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
 EMU_PID=$!
 EMU_DIR=$EMU_HOME/.aws/emulator/$PORT
 CA=$EMU_DIR/ca.pem
@@ -232,13 +237,20 @@ kind create cluster --name "$KIND_CLUSTER" --config "$WORK/kind.yaml" --kubeconf
 # The node instance's private address, on the node container's interface: the host reaches
 # it over the Docker bridge, and kube-proxy serves a NodePort on every local address.
 NODE=$KIND_CLUSTER-control-plane
-docker exec "$NODE" ip addr add "$NODE_INSTANCE_IP/32" dev eth0 >>"$LOG" 2>&1 || fail "adding $NODE_INSTANCE_IP to the kind node"
+# Traffic from the node (and its pods, masqueraded) to the emulator leaves from the instance's
+# address, as an EKS node's leaves from its ENI, so the security groups of an RDS or
+# ElastiCache endpoint judge the instance's own groups.
+as_instance() {
+  docker exec "$1" ip addr add "$2/32" dev eth0 >>"$LOG" 2>&1 || fail "adding $2 to the kind node $1"
+  docker exec "$1" ip route add "$GATEWAY/32" dev eth0 src "$2" >>"$LOG" 2>&1 || fail "routing $1's traffic to the emulator from $2"
+}
+as_instance "$NODE" "$NODE_INSTANCE_IP"
 say "node $NODE answers at $NODE_INSTANCE_IP for instance $INSTANCE"
 # kind names its workers <cluster>-worker, <cluster>-worker2, ... in the order of kind.yaml.
 for index in "${!WORKERS[@]}"; do
   read -r id address _ <<<"${WORKERS[$index]}"
   worker=$KIND_CLUSTER-worker$( ((index == 0)) || echo $((index + 1)) )
-  docker exec "$worker" ip addr add "$address/32" dev eth0 >>"$LOG" 2>&1 || fail "adding $address to the kind worker $worker"
+  as_instance "$worker" "$address"
   say "worker $worker answers at $address for instance $id"
 done
 
@@ -312,6 +324,34 @@ helm upgrade --install eks-pod-identity-agent "$WORK/eks-pod-identity-agent/char
   --set-string "agent.additionalArgs.--endpoint=$AWS_ENDPOINT_URL" \
   -f "$HERE/values/eks-pod-identity-agent.yaml" --wait --timeout 180s >>"$LOG" 2>&1 || fail "the EKS Pod Identity Agent did not start; see $LOG"
 say "webhook and EKS Pod Identity Agent running"
+
+# The node instances and the security groups they are in, which a database's or a cache's
+# inbound rules name to admit the cluster.
+NODE_INSTANCES=("$INSTANCE")
+for worker in "${WORKERS[@]}"; do read -r id _ <<<"$worker"; NODE_INSTANCES+=("$id"); done
+mapfile -t NODE_SECURITY_GROUPS < <(aws ec2 describe-instances --instance-ids "${NODE_INSTANCES[@]}" \
+  --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text | tr '\t' '\n' | sort -u)
+say "node instances [${NODE_INSTANCES[*]}] are in security groups [${NODE_SECURITY_GROUPS[*]}]"
+
+# What a consumer needs to keep working on the environment (KEEP_CLUSTER=1): source it, and
+# the AWS CLI, kubectl and helm reach this emulator and this cluster.
+cat >"$WORK/environment.sh" <<ENVIRONMENT
+export AWS_ENDPOINT_URL=$AWS_ENDPOINT_URL
+export AWS_CA_BUNDLE=$AWS_CA_BUNDLE
+export AWS_SHARED_CREDENTIALS_FILE=$AWS_SHARED_CREDENTIALS_FILE
+export AWS_CONFIG_FILE=$AWS_CONFIG_FILE
+export AWS_REGION=$REGION AWS_DEFAULT_REGION=$REGION AWS_EC2_METADATA_DISABLED=true AWS_PAGER=
+export KUBECONFIG=$KUBECONFIG
+export EMULATOR_CA=$CA
+export EMULATOR_ACCOUNT=$ACCOUNT
+export EKS_CLUSTER=$CLUSTER
+export EKS_OIDC_ISSUER=$ISSUER
+export KIND_CLUSTER=$KIND_CLUSTER
+export VPC_ID=$VPC
+export SUBNET_IDS="${SUBNETS[*]}"
+export NODE_SECURITY_GROUP_IDS="${NODE_SECURITY_GROUPS[*]}"
+ENVIRONMENT
+say "environment for consumers: $WORK/environment.sh"
 
 # --- 5. The checks ------------------------------------------------------------------------
 
@@ -432,6 +472,60 @@ check_load_balancer() {
   done
   say "load-balancer: GET http://$hostname/ answered: $(printf '%s' "$page" | tr -s '[:space:]' ' ' | cut -c1-120)"
   [[ $page == *"Welcome to nginx!"* ]] || { diagnose load-balancer kube-system probes; return 1; }
+}
+
+# Run psql in a pod against host $2, port $3, and print what it answers (stderr included).
+psql_probe() {
+  local name=$1 host=$2 port=$3
+  kubectl -n probes delete pod "$name" --ignore-not-found >>"$LOG" 2>&1
+  kubectl -n probes run "$name" --image "$PSQL_IMAGE" --restart Never \
+    --env "PGPASSWORD=$DATABASE_PASSWORD" --env PGSSLMODE=require --env PGCONNECT_TIMEOUT=15 \
+    --command -- psql -h "$host" -p "$port" -U app -d postgres -tAc 'select 1' >>"$LOG" 2>&1
+  kubectl -n probes wait pod "$name" --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s >>"$LOG" 2>&1 \
+    || kubectl -n probes wait pod "$name" --for=jsonpath='{.status.phase}'=Failed --timeout=5s >>"$LOG" 2>&1 || true
+  kubectl -n probes logs "$name" 2>&1
+}
+
+# An RDS for PostgreSQL instance named $1 on port $2, guarded by security group $3; prints
+# its endpoint's address and port once it is available.
+database_instance() {
+  local name=$1 port=$2 group=$3
+  aws rds create-db-instance --db-instance-identifier "$name" --engine postgres --engine-version 16 \
+    --db-instance-class db.t4g.micro --allocated-storage 20 --master-username app \
+    --master-user-password "$DATABASE_PASSWORD" --port "$port" --db-subnet-group-name probes \
+    --vpc-security-group-ids "$group" >>"$LOG" || return 1
+  aws rds wait db-instance-available --db-instance-identifier "$name" >>"$LOG" 2>&1 || return 1
+  aws rds describe-db-instances --db-instance-identifier "$name" \
+    --query 'DBInstances[0].[Endpoint.Address,Endpoint.Port]' --output text
+}
+
+check_database() {
+  aws rds create-db-subnet-group --db-subnet-group-name probes --db-subnet-group-description probes \
+    --subnet-ids "${SUBNETS[@]}" >>"$LOG" || { say "database: no DB subnet group"; return 1; }
+  # One group admits the nodes' groups on the instance's port; the other has no inbound rule.
+  local admitting closed group
+  admitting=$(aws ec2 create-security-group --group-name database-admits-nodes --description "admits the cluster" \
+    --vpc-id "$VPC" --query GroupId --output text)
+  for group in "${NODE_SECURITY_GROUPS[@]}"; do
+    aws ec2 authorize-security-group-ingress --group-id "$admitting" --protocol tcp --port 5432 --source-group "$group" >>"$LOG"
+  done
+  closed=$(aws ec2 create-security-group --group-name database-closed --description "admits nothing" \
+    --vpc-id "$VPC" --query GroupId --output text)
+  local admitted refused host port answer
+  admitted=$(database_instance probes-admitted 5432 "$admitting") || { say "database: probes-admitted did not become available"; return 1; }
+  refused=$(database_instance probes-refused 5433 "$closed") || { say "database: probes-refused did not become available"; return 1; }
+  say "database: probes-admitted at [$admitted], probes-refused at [$refused]"
+
+  read -r host port <<<"$admitted"
+  answer=$(psql_probe psql-admitted "$host" "$port")
+  say "database: a pod's select 1 on probes-admitted answered: $(printf '%s' "$answer" | tr -s '[:space:]' ' ' | cut -c1-160)"
+  [[ $(printf '%s' "$answer" | tr -d '[:space:]') == 1 ]] || { diagnose database probes; return 1; }
+
+  # The closed group: psql reports the connection closed or failed, and never the row.
+  read -r host port <<<"$refused"
+  answer=$(psql_probe psql-refused "$host" "$port")
+  say "database: a pod's select 1 on probes-refused answered: $(printf '%s' "$answer" | tr -s '[:space:]' ' ' | cut -c1-160)"
+  [[ $(printf '%s' "$answer" | tr -d '[:space:]') != 1 && $answer == *connection* ]] || { diagnose database probes; return 1; }
 }
 
 check_external_secrets() {

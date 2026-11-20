@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `fork/kubernetes/run.sh` creates a managed node group and runs one kind worker per instance, with the instance's providerID, and checks the ALB targets all of them (#9)
 - A container-backed RDS for PostgreSQL or ElastiCache endpoint closes a connection the DB instance's or the cache's VPC security groups do not admit before reading from it, when the source address is held by a network interface of the account; a source no network interface holds is let through (#11)
 - `fork/kubernetes/run.sh` runs kind on a Docker network that is also the EKS cluster's VPC, gives the node container the node instance's private address, and sends a request through the ALB the AWS Load Balancer Controller creates and checks the echo pod answers it (#4)
+- `fork/kubernetes/run.sh` checks that a pod reaches an RDS for PostgreSQL instance whose security group admits the nodes, and that an instance whose group admits nothing closes the pod's connection; each node sends its traffic to the emulator from its instance's address (#13)
+- With `KEEP_CLUSTER=1`, `fork/kubernetes/run.sh` writes `environment.sh`, which a consumer sources to keep working on the emulator and the cluster (#13)
+- A version tag publishes the emulator binary its workflow run tested, with its SHA-256, on the tag's GitHub release (#13)
 
 ### Fixed
 - Removing a deleted DB instance's or cache's container no longer removes a newer container of the same name, such as the one for an instance or group created again with the same identifier; the emulator removes a container by its Docker id, and a container dropped while it starts is removed once `docker run` answers (#12)
