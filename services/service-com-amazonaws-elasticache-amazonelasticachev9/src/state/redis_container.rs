@@ -121,6 +121,10 @@ enum ContainerState {
 pub struct RedisContainer {
     name: String,
     state: watch::Receiver<ContainerState>,
+    /// The id `docker run` answered, once it has. The container is removed by this id and
+    /// never by its name: a newer container of the same name (a resource deleted and one of
+    /// the same id created) belongs to someone else.
+    container_id: Arc<std::sync::OnceLock<String>>,
 }
 
 impl std::fmt::Debug for RedisContainer {
@@ -138,17 +142,27 @@ impl RedisContainer {
     pub fn start(spec: ContainerSpec) -> Arc<Self> {
         let (sender, receiver) = watch::channel(ContainerState::Starting);
         let name = spec.name.clone();
+        let container_id = Arc::new(std::sync::OnceLock::new());
+        let started = Arc::clone(&container_id);
         tokio::spawn(async move {
-            let outcome = run_container(&spec).await;
-            if let Err(reason) = &outcome {
+            let outcome = run_container(&spec, &started, || sender.is_closed()).await;
+            // A container dropped while it started is not a failure anybody waits on.
+            if let (Err(reason), false) = (&outcome, sender.is_closed()) {
                 tracing::error!(container = %spec.name, image = %spec.image, %reason, "the cache container did not start");
             }
-            let _ = sender.send(match outcome {
+            let delivered = sender.send(match outcome {
                 Ok(address) => ContainerState::Ready(address),
                 Err(reason) => ContainerState::Failed(reason),
             });
+            // Dropped while it started, before its id was known to the drop: nobody else
+            // removes it.
+            if delivered.is_err() {
+                if let Some(id) = started.get() {
+                    remove_container(id.clone());
+                }
+            }
         });
-        Arc::new(Self { name, state: receiver })
+        Arc::new(Self { name, state: receiver, container_id })
     }
 
     /// The container's name.
@@ -175,32 +189,46 @@ impl RedisContainer {
 
 impl Drop for RedisContainer {
     fn drop(&mut self) {
-        let name = self.name.clone();
-        // Removal must not block the request that dropped the endpoint.
-        std::thread::spawn(move || {
-            match std::process::Command::new("docker")
-                .args(["rm", "-f", "-v", &name])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-            {
-                Ok(output) if output.status.success() => {
-                    tracing::debug!(container = %name, "removed the cache container");
-                }
-                Ok(output) => tracing::warn!(
-                    container = %name,
-                    stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                    "docker rm of the cache container failed"
-                ),
-                Err(error) => tracing::warn!(container = %name, %error, "docker rm could not be started"),
-            }
-        });
+        // A container still starting has no id here yet; its start task removes it once
+        // `docker run` answers (see [`RedisContainer::start`]).
+        if let Some(id) = self.container_id.get() {
+            remove_container(id.clone());
+        }
     }
+}
+
+/// `docker rm -f -v` the container `id`, on a thread of its own: removal must not block the
+/// request that dropped the endpoint, and the thread also reaps the docker process.
+fn remove_container(id: String) {
+    std::thread::spawn(move || {
+        match std::process::Command::new("docker")
+            .args(["rm", "-f", "-v", &id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                tracing::debug!(container = %id, "removed the cache container");
+            }
+            Ok(output) => tracing::warn!(
+                container = %id,
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                "docker rm of the cache container failed"
+            ),
+            Err(error) => tracing::warn!(container = %id, %error, "docker rm could not be started"),
+        }
+    });
 }
 
 /// `docker run` the container, then wait until the server answers `PING` on the published
 /// port. Answers that loopback address.
-async fn run_container(spec: &ContainerSpec) -> Result<SocketAddr, String> {
+/// `started` receives the container's id as soon as `docker run` answers it, and the wait
+/// ends early once `abandoned` says nobody waits for the container any more.
+async fn run_container(
+    spec: &ContainerSpec,
+    started: &std::sync::OnceLock<String>,
+    abandoned: impl Fn() -> bool,
+) -> Result<SocketAddr, String> {
     // A container of the same name is one an earlier emulator left behind.
     let _ = Command::new("docker")
         .args(["rm", "-f", "-v", &spec.name])
@@ -237,9 +265,16 @@ async fn run_container(spec: &ContainerSpec) -> Result<SocketAddr, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !id.is_empty() {
+        let _ = started.set(id);
+    }
     let address = published_address(&spec.name).await?;
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     loop {
+        if abandoned() {
+            return Err(format!("{} was dropped while it started", spec.name));
+        }
         if answers_ping(address).await {
             tracing::info!(container = %spec.name, image = %spec.image, %address, "the cache container accepts connections");
             return Ok(address);
