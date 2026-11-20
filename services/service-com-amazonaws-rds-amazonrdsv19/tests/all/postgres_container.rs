@@ -38,7 +38,10 @@ fn container_backend() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn emulator() -> MultiServiceRouter {
-    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    emulator_on(Arc::new(engine::InMemoryEngine::new()))
+}
+
+fn emulator_on(engine: Arc<engine::InMemoryEngine>) -> MultiServiceRouter {
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
     router.register_service(EmulatedService::new(engine));
@@ -95,21 +98,27 @@ fn text(xml: &str, tag: &str) -> Option<String> {
 /// Create an instance of `engine_version` and wait until it is `available`. Answers the
 /// endpoint's port and the instance's resource id.
 async fn available_instance(router: &MultiServiceRouter, identifier: &str, engine_version: &str) -> (u16, String) {
-    let (status, body) = call(
-        router,
-        "CreateDBInstance",
-        &[
-            ("DBInstanceIdentifier", identifier),
-            ("Engine", "postgres"),
-            ("EngineVersion", engine_version),
-            ("DBInstanceClass", "db.t4g.micro"),
-            ("AllocatedStorage", "20"),
-            ("MasterUsername", MASTER_USER),
-            ("MasterUserPassword", MASTER_PASSWORD),
-            ("DBName", DATABASE),
-        ],
-    )
-    .await;
+    available_instance_with(router, identifier, engine_version, &[]).await
+}
+
+async fn available_instance_with(
+    router: &MultiServiceRouter,
+    identifier: &str,
+    engine_version: &str,
+    extra: &[(&str, &str)],
+) -> (u16, String) {
+    let mut params = vec![
+        ("DBInstanceIdentifier", identifier),
+        ("Engine", "postgres"),
+        ("EngineVersion", engine_version),
+        ("DBInstanceClass", "db.t4g.micro"),
+        ("AllocatedStorage", "20"),
+        ("MasterUsername", MASTER_USER),
+        ("MasterUserPassword", MASTER_PASSWORD),
+        ("DBName", DATABASE),
+    ];
+    params.extend_from_slice(extra);
+    let (status, body) = call(router, "CreateDBInstance", &params).await;
     assert_eq!(status, 200, "CreateDBInstance: {body}");
     let resource_id = text(&body, "DbiResourceId").expect("a DbiResourceId");
     for _ in 0..600 {
@@ -488,4 +497,104 @@ async fn a_deleted_instance_leaves_no_container_behind() {
     }
 
     assert!(gone, "{name} must be removed once the instance is deleted");
+}
+
+/// The security group of the DB instance, and the one of the client's network interface.
+const DATABASE_GROUP: &str = "sg-0d0b0d0b0d0b00001";
+const CLIENT_GROUP: &str = "sg-0d0b0d0b0d0b00002";
+
+/// EC2 holds the client's network interface at 127.0.0.1 (the address the test connects
+/// from) with `CLIENT_GROUP`, and `DATABASE_GROUP` with one inbound rule: TCP `port` from
+/// `CLIENT_GROUP`.
+fn guard_database(engine: &engine::InMemoryEngine, port: i32) {
+    use service_com_amazonaws_ec2_amazonec2::ops::types as ec2_types;
+    let state = service_com_amazonaws_ec2_amazonec2::state::service_state(engine).expect("the EC2 store");
+    let mut store = state.lock();
+    store.security_groups.insert(
+        DATABASE_GROUP.to_string(),
+        ec2_types::SecurityGroup {
+            group_id: Some(DATABASE_GROUP.to_string()),
+            group_name: Some("database".to_string()),
+            ip_permissions: Some(vec![ec2_types::IpPermission {
+                ip_protocol: Some("tcp".to_string()),
+                from_port: Some(port),
+                to_port: Some(port),
+                user_id_group_pairs: Some(vec![ec2_types::UserIdGroupPair {
+                    group_id: Some(CLIENT_GROUP.to_string()),
+                    ..ec2_types::UserIdGroupPair::default()
+                }]),
+                ..ec2_types::IpPermission::default()
+            }]),
+            ..ec2_types::SecurityGroup::default()
+        },
+    );
+    store.network_interfaces.insert(
+        "eni-0d0b0d0b0d0b00001".to_string(),
+        ec2_types::NetworkInterface {
+            network_interface_id: Some("eni-0d0b0d0b0d0b00001".to_string()),
+            private_ip_address: Some("127.0.0.1".to_string()),
+            groups: Some(vec![ec2_types::GroupIdentifier {
+                group_id: Some(CLIENT_GROUP.to_string()),
+                group_name: Some("client".to_string()),
+            }]),
+            ..ec2_types::NetworkInterface::default()
+        },
+    );
+}
+
+/// What the endpoint answers an `SSLRequest` with: `Some(b'S')` from a server, `None` when
+/// the connection is closed without an answer.
+async fn ssl_answer(port: u16) -> Option<u8> {
+    let mut conn = TcpStream::connect(("127.0.0.1", port)).await.expect("a TCP connection to the endpoint");
+    conn.write_all(&[0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f]).await.ok()?;
+    let mut answer = [0u8; 1];
+    match tokio::time::timeout(Duration::from_secs(10), conn.read(&mut answer)).await {
+        Ok(Ok(1)) => Some(answer[0]),
+        _ => None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
+#[allow(clippy::await_holding_lock)]
+async fn a_connection_the_security_groups_do_not_admit_is_closed_before_the_handshake() {
+    let _serial = container_backend();
+    let engine = Arc::new(engine::InMemoryEngine::new());
+    let router = emulator_on(Arc::clone(&engine));
+    // The rules are read for the instance's `Port`, which the listener prefers but may not
+    // get; the rule here names another port, so nothing admits the client.
+    let (port, _) = available_instance_with(
+        &router,
+        "pg-guarded",
+        "16",
+        &[("Port", "5441"), ("VpcSecurityGroupIds.VpcSecurityGroupId.1", DATABASE_GROUP)],
+    )
+    .await;
+    guard_database(&engine, 5442);
+
+    let answer = ssl_answer(port).await;
+
+    assert_eq!(answer, None, "the endpoint answered a client its security groups do not admit");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
+#[allow(clippy::await_holding_lock)]
+async fn a_connection_the_security_groups_admit_reaches_the_server() {
+    let _serial = container_backend();
+    let engine = Arc::new(engine::InMemoryEngine::new());
+    let router = emulator_on(Arc::clone(&engine));
+    // The rule names the instance's `Port`, whatever port the listener got.
+    let (port, _) = available_instance_with(
+        &router,
+        "pg-admitted",
+        "16",
+        &[("Port", "5443"), ("VpcSecurityGroupIds.VpcSecurityGroupId.1", DATABASE_GROUP)],
+    )
+    .await;
+    guard_database(&engine, 5443);
+
+    let answer = ssl_answer(port).await;
+
+    assert_eq!(answer, Some(b'S'));
 }

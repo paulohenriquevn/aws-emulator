@@ -207,6 +207,18 @@ no replication or failover between nodes. Cluster mode enabled groups, serverles
 Memcached keep the metadata-only behavior. The emulator closes a connection idle for 300
 seconds, which a client's connection pool has to reconnect from.
 
+## Security groups on database endpoints
+
+A container-backed RDS or ElastiCache endpoint applies the DB instance's or the cache's VPC
+security groups to each connection, by its source address. A replication group's groups are its
+member clusters', read when the connection arrives. When a network interface of the account
+holds that address, its security groups and the address are the source the inbound rules are
+read against, on the instance's or the cache's port; a connection no rule admits is closed
+before anything is read from it. A source no network interface holds, such as a client on the
+emulator's host, is let through, and so is a connection to an instance or cache whose groups EC2
+does not hold. The core passes the source address to native listeners through
+`emulator_server::connection_peer()`.
+
 ## Known limits
 
 - The EKS Pod Identity webhook reads the associations once, when `run.sh` starts it. An
@@ -241,6 +253,7 @@ upstream ships the fix.
 | STS | `GetCallerIdentity` reports EKS Pod Identity credentials as the associated role's session (`assumed-role/<role>/eks-...`) | not reported yet |
 | EKS Auth | `AssumeRoleForPodIdentity` serves an EKS cluster of the emulator whose tokens a registered external Kubernetes cluster signs | not reported yet |
 | EKS | `CreateNodegroup` launches `desiredSize` EC2 instances of the Amazon EKS optimized AL2023 AMI over the node group's subnets, tagged `eks:cluster-name` and `eks:nodegroup-name`, and `DeleteNodegroup` terminates them (`src/state/nodegroup_instances.rs`). No Auto Scaling group is created, and `UpdateNodegroupConfig` launches or terminates nothing | not reported yet |
+| RDS, ElastiCache (and core listeners) | A container-backed endpoint closes a connection its VPC security groups do not admit (RDS `src/state/data_plane/postgres_container.rs`, ElastiCache `src/state/redis_container.rs`, EC2 `src/state/connection_firewall.rs`, `vendor/server/src/listeners.rs`) | not reported yet |
 | Price List | EC2 instance products carry the `marketoption` attribute (`OnDemand`) | not reported yet |
 | EC2 | Each state an instance moves into is published on EventBridge as an `EC2 Instance State-change Notification`, including the states the clock moves it into | [aws/aws-emulator#549](https://github.com/aws/aws-emulator/issues/549) |
 

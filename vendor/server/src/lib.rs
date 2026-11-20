@@ -42,7 +42,7 @@ pub use listener_guard::{
     SurfaceError, LISTENER_PORT_RANGE_ENV,
 };
 pub use listeners::{
-    Listeners, ListenerConn, ListenerStream, HttpHandler, HttpPolicy, NativeHandler,
+    connection_peer, Listeners, ListenerConn, ListenerStream, HttpHandler, HttpPolicy, NativeHandler,
     ResourceListener, TlsUpgrader,
 };
 

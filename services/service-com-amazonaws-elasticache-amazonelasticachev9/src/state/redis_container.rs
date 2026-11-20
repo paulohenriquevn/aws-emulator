@@ -298,13 +298,74 @@ pub struct RedisProxy {
     container: Arc<RedisContainer>,
     /// The core's TLS server, for a cache with transit encryption.
     tls: Option<::emulator_server::TlsUpgrader>,
+    /// The cache's security groups, applied to each connection by its source address.
+    guard: Option<ConnectionGuard>,
+}
+
+type Ec2Store = ::engine::ServiceState<::service_com_amazonaws_ec2_amazonec2::state::ComAmazonawsEc2Amazonec2State>;
+
+/// What decides whether a source may connect to a cache: the cache's security groups, read
+/// from its record when the connection arrives, so a `Modify...` that changes them applies
+/// to the next connection, and the account's EC2 store, which holds the groups' rules and
+/// the network interface a source address belongs to.
+#[derive(Clone)]
+pub struct ConnectionGuard {
+    state: ::engine::ServiceState<super::ComAmazonawsElasticacheAmazonelasticachev9State>,
+    /// The replication group or cache cluster id.
+    id: String,
+    /// The cache's `Port`, the port the inbound rules are read for.
+    port: i32,
+    firewall: Ec2Store,
+}
+
+impl ConnectionGuard {
+    /// Whether the cache's security groups refuse a connection from `peer`: only a verdict
+    /// of the groups refuses, and an undecided question (a source no network interface of
+    /// the account holds, a group EC2 does not hold) lets the connection through.
+    fn refuses(&self, peer: Option<std::net::SocketAddr>) -> bool {
+        let Some(peer) = peer else {
+            return false;
+        };
+        // A replication group's security groups are its member clusters' (the group record
+        // holds none): every member is created with the groups the request named.
+        let groups = {
+            let store = self.state.lock();
+            let cluster_id = match store.replication_groups.get(&self.id) {
+                Some(group) => group
+                    .node_groups
+                    .iter()
+                    .flat_map(|shard| shard.members.iter())
+                    .map(|member| member.cache_cluster_id.clone())
+                    .next(),
+                None => Some(self.id.clone()),
+            };
+            cluster_id
+                .and_then(|id| store.cache_clusters.get(&id))
+                .map(|cluster| cluster.security_group_ids.clone())
+        };
+        let Some(groups) = groups else {
+            return false;
+        };
+        let store = self.firewall.lock();
+        ::service_com_amazonaws_ec2_amazonec2::state::connection_firewall::store_admits_connection(&store, &groups, peer.ip(), self.port)
+            == Some(false)
+    }
 }
 
 impl ::emulator_server::NativeHandler for RedisProxy {
     fn serve(&self, conn: ::emulator_server::ListenerConn) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let container = Arc::clone(&self.container);
         let tls = self.tls.clone();
+        let guard = self.guard.clone();
         Box::pin(async move {
+            // A connection the cache's security groups do not admit is closed before anything
+            // is read from it, as a dropped SYN never reaches the node on AWS.
+            let peer = ::emulator_server::connection_peer();
+            if guard.as_ref().is_some_and(|guard| guard.refuses(peer)) {
+                tracing::warn!(container = %container.name(), ?peer, "the cache's security groups do not admit this connection");
+                drop(conn);
+                return;
+            }
             if let Err(error) = proxy_connection(&container, tls, conn).await {
                 tracing::debug!(container = %container.name(), %error, "a proxied cache connection ended with an error");
             }
@@ -367,6 +428,7 @@ pub async fn open_endpoint<Eng: Send + Sync + 'static>(
     password: Option<String>,
     transit_encryption: bool,
     port: i32,
+    guard: Option<ConnectionGuard>,
 ) -> Result<RedisEndpoint, String> {
     let (image, server) =
         image_for(engine_name, engine_version).ok_or_else(|| format!("engine {engine_name} is not served by a container"))?;
@@ -394,6 +456,7 @@ pub async fn open_endpoint<Eng: Send + Sync + 'static>(
     let proxy = RedisProxy {
         container: Arc::clone(&container),
         tls,
+        guard,
     };
     let listener = match u16::try_from(port) {
         Ok(preferred) => listeners.tcp_plaintext_preferring(proxy, preferred).await,
@@ -443,6 +506,12 @@ pub fn serve_in_background<Eng: Send + Sync + 'static>(
     state: ::engine::ServiceState<super::ComAmazonawsElasticacheAmazonelasticachev9State>,
     cache: ServedCache,
 ) {
+    let guard = ::service_com_amazonaws_ec2_amazonec2::state::service_state(&*engine).map(|firewall| ConnectionGuard {
+        state: state.clone(),
+        id: cache.id.clone(),
+        port: cache.port,
+        firewall,
+    });
     tokio::spawn(async move {
         match open_endpoint(
             &*engine,
@@ -452,6 +521,7 @@ pub fn serve_in_background<Eng: Send + Sync + 'static>(
             cache.password.clone(),
             cache.transit_encryption,
             cache.port,
+            guard,
         )
         .await
         {

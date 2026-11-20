@@ -220,6 +220,84 @@ async fn a_deleted_group_leaves_no_container_behind() {
     panic!("container {name} is still there after DeleteReplicationGroup");
 }
 
+/// The cache's security group, with one inbound rule: TCP `rule_port` from the client's group,
+/// which a network interface of the account at 127.0.0.1 (the address the test connects
+/// from) carries. Answers the cache's group.
+async fn guard_cache(emulator: &Emulator, rule_port: i32) -> String {
+    use service_com_amazonaws_ec2_amazonec2::ops::types as ec2_types;
+    let cache_group = emulator.security_group_named("cache").await;
+    let client_group = emulator.security_group_named("client").await;
+    emulator
+        .ec2(crate::harness::REGION)
+        .authorize_security_group_ingress()
+        .group_id(&cache_group)
+        .ip_permissions(
+            ::aws_sdk_ec2::types::IpPermission::builder()
+                .ip_protocol("tcp")
+                .from_port(rule_port)
+                .to_port(rule_port)
+                .user_id_group_pairs(::aws_sdk_ec2::types::UserIdGroupPair::builder().group_id(&client_group).build())
+                .build(),
+        )
+        .send()
+        .await
+        .expect("EC2 must add the inbound rule");
+    let state = service_com_amazonaws_ec2_amazonec2::state::service_state(&**emulator.engine()).expect("the EC2 store");
+    state.lock().network_interfaces.insert(
+        "eni-0e1a5c0e1a5c00001".to_string(),
+        ec2_types::NetworkInterface {
+            network_interface_id: Some("eni-0e1a5c0e1a5c00001".to_string()),
+            private_ip_address: Some("127.0.0.1".to_string()),
+            groups: Some(vec![ec2_types::GroupIdentifier {
+                group_id: Some(client_group),
+                group_name: Some("client".to_string()),
+            }]),
+            ..ec2_types::NetworkInterface::default()
+        },
+    );
+    cache_group
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
+async fn a_connection_the_security_groups_do_not_admit_is_closed_unanswered() {
+    let _backend = container_backend();
+    let emulator = Emulator::new();
+    // The rule names another port than the cache's, so nothing admits the client.
+    let cache_group = guard_cache(&emulator, 6394).await;
+    let (host, port) = served_group(
+        &emulator,
+        "refused-group",
+        &[("Port", "6393"), ("SecurityGroupIds.SecurityGroupId.1", &cache_group)],
+    )
+    .await;
+
+    let mut stream = TcpStream::connect((host.as_str(), port)).await.expect("a connection to the endpoint");
+    let reply = tokio::time::timeout(Duration::from_secs(10), exchange(&mut stream, &[&["PING"][..]]))
+        .await
+        .expect("the endpoint neither answered nor closed the connection");
+
+    assert_eq!(reply, vec![String::new()], "the endpoint answered a client its security groups do not admit");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
+async fn a_connection_the_security_groups_admit_reaches_the_server() {
+    let _backend = container_backend();
+    let emulator = Emulator::new();
+    let cache_group = guard_cache(&emulator, 6395).await;
+    let (host, port) = served_group(
+        &emulator,
+        "admitted-group",
+        &[("Port", "6395"), ("SecurityGroupIds.SecurityGroupId.1", &cache_group)],
+    )
+    .await;
+
+    let reply = command_over(plain(host, port), &["PING"]).await;
+
+    assert_eq!(reply, "+PONG");
+}
+
 /// A TLS client that accepts the emulator's certificate whatever it names: what is checked
 /// here is that the endpoint speaks TLS, not the certificate chain.
 fn tls_connector() -> tokio_rustls::TlsConnector {
