@@ -128,9 +128,11 @@ launches the instances in EC2 (below), and each one becomes a kind worker the sa
 added to the worker container's interface. The control-plane node keeps the instance launched
 above.
 
-Each node also routes its traffic to the emulator from the instance's address (`ip route add
-<gateway>/32 src <instance address>`), so a pod's connection, masqueraded by the node, arrives
-from the address an ENI of the account holds, as from an EKS node. The security groups of an
+Each node also sends its traffic to the emulator from the instance's address: its own through
+a route (`ip route add <gateway>/32 src <instance address>`), its pods' TCP through a SNAT rule
+ahead of kind's masquerade, which would otherwise pick the node's Docker address. A connection
+from the node or a pod then arrives from the address an ENI of the account holds, as from an
+EKS node. The security groups of an
 RDS or ElastiCache endpoint then judge the node instance's groups (see "Security groups on
 database endpoints"). The harness runs RDS with `EMULATOR_RDS_BACKEND=docker`.
 

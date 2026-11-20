@@ -244,6 +244,11 @@ NODE=$KIND_CLUSTER-control-plane
 as_instance() {
   docker exec "$1" ip addr add "$2/32" dev eth0 >>"$LOG" 2>&1 || fail "adding $2 to the kind node $1"
   docker exec "$1" ip route add "$GATEWAY/32" dev eth0 src "$2" >>"$LOG" 2>&1 || fail "routing $1's traffic to the emulator from $2"
+  # A pod's connection is masqueraded to the address of eth0's own subnet whatever the route's
+  # src says, so pod traffic to the emulator (DNS aside) is translated to the instance's
+  # address explicitly, ahead of kind's masquerade rules.
+  docker exec "$1" iptables -t nat -I POSTROUTING 1 -s "$POD_CIDR" -d "$GATEWAY/32" -p tcp ! --dport 53 \
+    -j SNAT --to-source "$2" >>"$LOG" 2>&1 || fail "translating $1's pod traffic to the emulator to $2"
 }
 as_instance "$NODE" "$NODE_INSTANCE_IP"
 say "node $NODE answers at $NODE_INSTANCE_IP for instance $INSTANCE"

@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `fork/kubernetes/run.sh` checks that a pod reaches an RDS for PostgreSQL instance whose security group admits the nodes, and that an instance whose group admits nothing closes the pod's connection; each node sends its traffic to the emulator from its instance's address (#13)
 - With `KEEP_CLUSTER=1`, `fork/kubernetes/run.sh` writes `environment.sh`, which a consumer sources to keep working on the emulator and the cluster (#13)
 - A version tag publishes the emulator binary its workflow run tested, with its SHA-256, on the tag's GitHub release (#13)
+- `fork/kubernetes/run.sh` translates a pod's TCP connection to the emulator to its node instance's address, so a database's security groups judge the node's groups (#13)
 - `fork/kubernetes/run.sh` pulls the images its probes and the load balancer controller run once on the host, retrying when the registry refuses, and loads them into every node (#13)
 
 ### Fixed
