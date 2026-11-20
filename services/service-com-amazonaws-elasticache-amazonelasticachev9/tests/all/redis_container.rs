@@ -298,6 +298,39 @@ async fn a_connection_the_security_groups_admit_reaches_the_server() {
     assert_eq!(reply, "+PONG");
 }
 
+/// A container dropped after a newer one took its name (a group deleted and one of the same
+/// id created, as `terraform apply` after a `destroy` does) must remove its own container
+/// only: the newer one keeps serving.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
+async fn a_dropped_container_leaves_a_newer_one_of_its_name_running() {
+    use service_com_amazonaws_elasticache_amazonelasticachev9::state::redis_container::{
+        container_name, image_for, ContainerSpec, RedisContainer,
+    };
+    let _backend = container_backend();
+    let (image, server) = image_for("valkey", Some("8.0")).expect("a Valkey image");
+    let spec = ContainerSpec { name: container_name("shared-name"), image, server, password: None };
+    let older = RedisContainer::start(spec.clone());
+    older.ready().await.expect("the older container is ready");
+    let newer = RedisContainer::start(spec.clone());
+    let address = newer.ready().await.expect("the newer container is ready");
+
+    drop(older);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let listed = std::process::Command::new("docker")
+        .args(["ps", "-q", "--filter", &format!("name=^{}$", spec.name)])
+        .output()
+        .expect("docker ps");
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).trim().is_empty(),
+        "dropping the older container removed the newer {}",
+        spec.name
+    );
+    TcpStream::connect(address).await.expect("the newer container still accepts connections");
+    drop(newer);
+}
+
 /// A TLS client that accepts the emulator's certificate whatever it names: what is checked
 /// here is that the endpoint speaks TLS, not the certificate chain.
 fn tls_connector() -> tokio_rustls::TlsConnector {

@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `fork/kubernetes/run.sh` runs kind on a Docker network that is also the EKS cluster's VPC, gives the node container the node instance's private address, and sends a request through the ALB the AWS Load Balancer Controller creates and checks the echo pod answers it (#4)
 
 ### Fixed
+- Removing a deleted DB instance's or cache's container no longer removes a newer container of the same name, such as the one for an instance or group created again with the same identifier; the emulator removes a container by its Docker id, and a container dropped while it starts is removed once `docker run` answers (#12)
 - A request the ALB forwards reaches its target only when an inbound rule of the target's security groups admits the load balancer on the traffic port, and answers 502 otherwise, as health checks already did for the health-check port (#6)
 
 ## [0.1.0] - 2026-11-18

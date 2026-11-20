@@ -598,3 +598,32 @@ async fn a_connection_the_security_groups_admit_reaches_the_server() {
 
     assert_eq!(answer, Some(b'S'));
 }
+
+/// A container dropped after a newer one took its name (an instance deleted and one with
+/// the same resource id created, as every fresh store mints the same first id) must remove
+/// its own container only: the newer one keeps serving.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run with --ignored"]
+#[allow(clippy::await_holding_lock)]
+async fn a_dropped_container_leaves_a_newer_one_of_its_name_running() {
+    use postgres_container::{ContainerSpec, PostgresContainer};
+    let _serial = container_backend();
+    let spec = ContainerSpec {
+        name: postgres_container::container_name("db-shared-name"),
+        image: postgres_container::image_for(postgres_container::DEFAULT_IMAGE_REPOSITORY, Some("16")),
+        master_username: MASTER_USER.to_string(),
+        master_password: MASTER_PASSWORD.to_string(),
+        database: None,
+    };
+    let older = PostgresContainer::start(spec.clone());
+    older.ready().await.expect("the older container is ready");
+    let newer = PostgresContainer::start(spec.clone());
+    let address = newer.ready().await.expect("the newer container is ready");
+
+    drop(older);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert!(container_exists(&spec.name), "dropping the older container removed the newer {}", spec.name);
+    TcpStream::connect(address).await.expect("the newer container still accepts connections");
+    drop(newer);
+}
