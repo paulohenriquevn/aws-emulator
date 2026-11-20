@@ -81,6 +81,7 @@ WEBHOOK_IMAGE=amazon/amazon-eks-pod-identity-webhook:latest
 AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.37.8
 FILE_SERVER_IMAGE=nginx:1.29.3-alpine
 PSQL_IMAGE=postgres:16.11-alpine
+LBC_IMAGE=public.ecr.aws/eks/aws-load-balancer-controller:v$LBC_CHART_VERSION
 DATABASE_PASSWORD=probe-Secret-42
 
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE
@@ -130,7 +131,7 @@ mkdir -p "$EMU_HOME"
 # accepts as a hostname; a socket's host:port is refused there.
 # EMULATOR_IAM_ENFORCE=on: every call a pod makes is judged against its role's policies
 # (fork/iam-gate), so each role below carries the policy its controller documents.
-RUST_LOG=${EMULATOR_LOG:-info,access=debug} EMULATOR_IAM_ENFORCE=${EMULATOR_IAM_ENFORCE:-on} EMULATOR_RDS_BACKEND=${EMULATOR_RDS_BACKEND:-docker} EMULATOR_ELB_LISTENER_SOCKETS=off EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
+RUST_LOG=${EMULATOR_LOG:-info,access=debug,service_com_amazonaws_rds_amazonrdsv19=debug} EMULATOR_IAM_ENFORCE=${EMULATOR_IAM_ENFORCE:-on} EMULATOR_RDS_BACKEND=${EMULATOR_RDS_BACKEND:-docker} EMULATOR_ELB_LISTENER_SOCKETS=off EMULATOR_BIND_ADDRESS=$GATEWAY HOME=$EMU_HOME "$BIN" -b "$GATEWAY" -p "$PORT" --telemetry off >"$WORK/emulator.log" 2>&1 &
 EMU_PID=$!
 EMU_DIR=$EMU_HOME/.aws/emulator/$PORT
 CA=$EMU_DIR/ca.pem
@@ -317,6 +318,22 @@ fi
 git -C "$WORK/eks-pod-identity-agent" checkout -q "$POD_IDENTITY_AGENT_COMMIT"
 docker build -q -t eks-pod-identity-agent:fork "$WORK/eks-pod-identity-agent" >>"$LOG" 2>&1 || fail "building the EKS Pod Identity Agent image; see $LOG"
 kind load docker-image eks-pod-identity-agent:fork --name "$KIND_CLUSTER" >>"$LOG" 2>&1
+
+# The images the probes and the controllers run, pulled once by the host (with retries, as a
+# registry answers 429 Too Many Requests to a burst) and loaded into every node, instead of
+# pulled by each node on its own.
+preload_image() {
+  local image=$1 attempt
+  for attempt in 1 2 3 4 5; do
+    docker pull -q "$image" >>"$LOG" 2>&1 && break
+    [[ $attempt == 5 ]] && fail "pulling $image; see $LOG"
+    say "pulling $image failed (attempt $attempt), retrying"
+    sleep $((attempt * 15))
+  done
+  kind load docker-image "$image" --name "$KIND_CLUSTER" >>"$LOG" 2>&1 || fail "loading $image into the kind nodes; see $LOG"
+}
+for image in "$AWS_CLI_IMAGE" "$LBC_IMAGE" "$PSQL_IMAGE" "$FILE_SERVER_IMAGE"; do preload_image "$image"; done
+say "images loaded into the kind nodes"
 helm upgrade --install eks-pod-identity-agent "$WORK/eks-pod-identity-agent/charts/eks-pod-identity-agent" -n kube-system \
   --set clusterName="$CLUSTER" --set image.override=eks-pod-identity-agent:fork --set image.pullPolicy=Never \
   --set env.AWS_REGION="$REGION" --set env.AWS_ACCESS_KEY_ID="$KEY_ID" --set env.AWS_SECRET_ACCESS_KEY="$SECRET_KEY" \
@@ -499,6 +516,25 @@ database_instance() {
     --query 'DBInstances[0].[Endpoint.Address,Endpoint.Port]' --output text
 }
 
+# What decides the security groups' verdict on a connection to port $1: the node addresses
+# and routes, the interfaces the account holds with their groups, the DB instances' groups
+# and, when tcpdump runs without a password, the source address of the SYNs the host sees.
+database_network_facts() {
+  local port=$1 node
+  for node in $(kind get nodes --name "$KIND_CLUSTER"); do
+    say "database: $node eth0 $(docker exec "$node" ip -4 -o addr show dev eth0 | awk '{print $4}' | tr '\n' ' ')route $(docker exec "$node" ip route get "$GATEWAY" | head -1)"
+  done
+  say "database: interfaces $(aws ec2 describe-network-interfaces --query 'NetworkInterfaces[].[PrivateIpAddress,join(`,`,Groups[].GroupId)]' --output text | tr -s '\t\n' ' :')"
+  say "database: instance groups $(aws rds describe-db-instances --query 'DBInstances[].[DBInstanceIdentifier,join(`,`,VpcSecurityGroups[].VpcSecurityGroupId)]' --output text | tr -s '\t\n' ' :')"
+  CAPTURE_PID=
+  if command -v tcpdump >/dev/null && sudo -n true 2>/dev/null; then
+    # shellcheck disable=SC2024 # the capture file is the caller's, written without root
+    sudo timeout 60 tcpdump -nn -l -c 3 -i any "tcp dst port $port and tcp[tcpflags] & tcp-syn != 0" >"$WORK/database-syn.txt" 2>>"$LOG" &
+    CAPTURE_PID=$!
+    sleep 2
+  fi
+}
+
 check_database() {
   aws rds create-db-subnet-group --db-subnet-group-name probes --db-subnet-group-description probes \
     --subnet-ids "${SUBNETS[@]}" >>"$LOG" || { say "database: no DB subnet group"; return 1; }
@@ -523,7 +559,9 @@ check_database() {
 
   # The closed group: psql reports the connection closed or failed, and never the row.
   read -r host port <<<"$refused"
+  database_network_facts "$port"
   answer=$(psql_probe psql-refused "$host" "$port")
+  [[ -n ${CAPTURE_PID:-} ]] && { wait "$CAPTURE_PID" || true; say "database: SYNs the host saw on $port: $(tr -s '\n' ' ' <"$WORK/database-syn.txt" | cut -c1-400)"; }
   say "database: a pod's select 1 on probes-refused answered: $(printf '%s' "$answer" | tr -s '[:space:]' ' ' | cut -c1-160)"
   [[ $(printf '%s' "$answer" | tr -d '[:space:]') != 1 && $answer == *connection* ]] || { diagnose database probes; return 1; }
 }

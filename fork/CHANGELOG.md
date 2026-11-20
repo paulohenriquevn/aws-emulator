@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `fork/kubernetes/run.sh` checks that a pod reaches an RDS for PostgreSQL instance whose security group admits the nodes, and that an instance whose group admits nothing closes the pod's connection; each node sends its traffic to the emulator from its instance's address (#13)
 - With `KEEP_CLUSTER=1`, `fork/kubernetes/run.sh` writes `environment.sh`, which a consumer sources to keep working on the emulator and the cluster (#13)
 - A version tag publishes the emulator binary its workflow run tested, with its SHA-256, on the tag's GitHub release (#13)
+- `fork/kubernetes/run.sh` pulls the images its probes and the load balancer controller run once on the host, retrying when the registry refuses, and loads them into every node (#13)
 
 ### Fixed
 - Removing a deleted DB instance's or cache's container no longer removes a newer container of the same name, such as the one for an instance or group created again with the same identifier; the emulator removes a container by its Docker id, and a container dropped while it starts is removed once `docker run` answers (#12)
