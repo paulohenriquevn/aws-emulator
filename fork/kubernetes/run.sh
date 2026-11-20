@@ -330,7 +330,14 @@ preload_image() {
     say "pulling $image failed (attempt $attempt), retrying"
     sleep $((attempt * 15))
   done
-  kind load docker-image "$image" --name "$KIND_CLUSTER" >>"$LOG" 2>&1 || fail "loading $image into the kind nodes; see $LOG"
+  # Imported with the node's own platform only: `kind load docker-image` asks containerd for
+  # every platform of a multi-platform image, and the host's Docker holds only its own.
+  local node platform
+  platform=linux/$(docker version -f '{{.Server.Arch}}')
+  for node in $(kind get nodes --name "$KIND_CLUSTER"); do
+    docker save "$image" | docker exec -i "$node" ctr --namespace=k8s.io images import --platform "$platform" \
+      --digests --snapshotter=overlayfs - >>"$LOG" 2>&1 || fail "loading $image into the kind node $node; see $LOG"
+  done
 }
 for image in "$AWS_CLI_IMAGE" "$LBC_IMAGE" "$PSQL_IMAGE" "$FILE_SERVER_IMAGE"; do preload_image "$image"; done
 say "images loaded into the kind nodes"
