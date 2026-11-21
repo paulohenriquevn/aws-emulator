@@ -125,3 +125,24 @@ func TestAClusterNameKindCannotCarryIsRecognised(t *testing.T) {
 		}
 	}
 }
+
+func TestAControlPlaneBuiltForAnotherIssuerIsStale(t *testing.T) {
+	dir := t.TempDir()
+	spec := clusterSpec{StateDir: dir}
+	if err := recordIssuer(spec, "https://oidc.eks.us-east-1.amazonaws.com/id/OLD"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !builtForAnotherIssuer(spec, "https://oidc.eks.us-east-1.amazonaws.com/id/NEW") {
+		t.Fatal("a control plane built for the old issuer was kept for the new one")
+	}
+	if builtForAnotherIssuer(spec, "https://oidc.eks.us-east-1.amazonaws.com/id/OLD") {
+		t.Fatal("a control plane built for this issuer was taken as stale")
+	}
+}
+
+func TestAControlPlaneWithNoRecordedIssuerIsStale(t *testing.T) {
+	if !builtForAnotherIssuer(clusterSpec{StateDir: t.TempDir()}, "https://oidc.eks.us-east-1.amazonaws.com/id/NEW") {
+		t.Fatal("a control plane of unknown origin was kept")
+	}
+}

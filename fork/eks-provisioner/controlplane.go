@@ -55,6 +55,25 @@ func (spec clusterSpec) caCert() string     { return filepath.Join(spec.StateDir
 func (spec clusterSpec) caKey() string      { return filepath.Join(spec.StateDir, "pki", "ca.key") }
 func (spec clusterSpec) authDir() string    { return filepath.Join(spec.StateDir, "eks-auth") }
 func (spec clusterSpec) kubeconfig() string { return filepath.Join(spec.StateDir, "kubeconfig") }
+func (spec clusterSpec) issuerFile() string { return filepath.Join(spec.StateDir, "issuer") }
+
+// recordIssuer notes which cluster a kind cluster was built for: its OIDC issuer is unique
+// to one EKS cluster, so a cluster deleted and created again under the same name has
+// another one.
+func recordIssuer(spec clusterSpec, issuer string) error {
+	if err := os.MkdirAll(spec.StateDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(spec.issuerFile(), []byte(issuer), 0o644)
+}
+
+// builtForAnotherIssuer is whether the kind cluster was built for another EKS cluster of
+// the same name (an emulator restart forgets every cluster, and Terraform creates them
+// again), so it signs with a CA the new cluster does not report.
+func builtForAnotherIssuer(spec clusterSpec, issuer string) bool {
+	recorded, err := os.ReadFile(spec.issuerFile())
+	return err != nil || strings.TrimSpace(string(recorded)) != issuer
+}
 
 // kindConfig is the kind cluster for spec: one control-plane node that signs with the
 // cluster's own CA, issues service account tokens as the cluster's OIDC issuer, serves
@@ -240,6 +259,12 @@ func (p *provisioner) provisionControlPlane(ctx context.Context, region string, 
 		ServiceCIDR: serviceCIDR,
 		StateDir:    p.clusterDir(region, name),
 	}
+	if p.kindExists(spec.KindName) && builtForAnotherIssuer(spec, plane.Issuer) {
+		p.log.Info("the control plane was built for an earlier cluster of the same name; rebuilding it", "cluster", name, "region", region)
+		if err := p.kind.Delete(spec.KindName, spec.kubeconfig()); err != nil {
+			return fmt.Errorf("kind delete cluster %s: %w", spec.KindName, err)
+		}
+	}
 	if err := writeCA(spec, plane); err != nil {
 		return err
 	}
@@ -260,6 +285,9 @@ func (p *provisioner) provisionControlPlane(ctx context.Context, region string, 
 		)
 		if err != nil {
 			return fmt.Errorf("kind create cluster %s: %w", spec.KindName, err)
+		}
+		if err := recordIssuer(spec, plane.Issuer); err != nil {
+			return err
 		}
 	}
 	controlPlaneNode := spec.KindName + "-control-plane"
