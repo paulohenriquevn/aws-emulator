@@ -166,6 +166,17 @@ jobs:
           cargo test
           -p aws-emulator-fork-router --test external_cluster_identity
 
+      - name: An EKS control plane provisioned outside the emulator
+        run: >-
+          cargo test
+          -p aws-emulator-fork-eks-control-plane
+          -p aws-emulator-fork-router --test eks_external_control_plane
+
+      - name: The EKS certificate authority keeps its signing key
+        run: >-
+          cargo test -p service-com-amazonaws-eks-awswesleyfrontend --lib --
+          control_plane_provisioning certificate_material
+
       - name: IAM policies are enforced on every service
         run: >-
           cargo test
@@ -267,12 +278,74 @@ jobs:
             ${{ runner.temp }}/kubernetes/diagnostics/
           if-no-files-found: ignore
 
+  eks-provisioner:
+    # EKS clusters whose control plane and nodes the provisioner runs in kind, created and
+    # reached through the EKS API alone (fork/eks-provisioner/e2e.sh), on the binary the
+    # acceptance job built.
+    needs: acceptance
+    if: ${{ !cancelled() && (needs.acceptance.result == 'success' || inputs.emulator-run-id) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: fork/eks-provisioner/go.mod
+          cache-dependency-path: fork/eks-provisioner/go.sum
+
+      - name: Unit tests
+        working-directory: fork/eks-provisioner
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+          go test ./...
+
+      - name: Build the provisioner
+        working-directory: fork/eks-provisioner
+        run: CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$RUNNER_TEMP/bin/eks-provisioner" .
+
+      - name: Install kind
+        run: |
+          curl -sSfLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+
+      - name: Fetch the emulator binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: aws-emulator-fork-linux-x64
+          path: ${{ runner.temp }}/bin
+          run-id: ${{ inputs.emulator-run-id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: EKS through the API, Kubernetes in kind
+        env:
+          E2E_WORK: ${{ runner.temp }}/eks-provisioner
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/aws-emulator-fork"
+          fork/eks-provisioner/e2e.sh "$RUNNER_TEMP/bin/aws-emulator-fork" "$RUNNER_TEMP/bin/eks-provisioner"
+
+      - name: Keep the provisioner binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: eks-provisioner-linux-x64
+          path: ${{ runner.temp }}/bin/eks-provisioner
+
+      - name: Keep the logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: eks-provisioner-logs
+          path: ${{ runner.temp }}/eks-provisioner/*.log
+          if-no-files-found: ignore
+
   release:
     # Publishes, for a version tag, the emulator binary this run built and both jobs tested,
     # with its SHA-256, on the GitHub release of that tag. The notes are the version's section
     # of fork/CHANGELOG.md.
-    needs: [acceptance, kubernetes]
-    if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.acceptance.result == 'success' && needs.kubernetes.result == 'success' }}
+    needs: [acceptance, kubernetes, eks-provisioner]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.acceptance.result == 'success' && needs.kubernetes.result == 'success' && needs.eks-provisioner.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -286,13 +359,21 @@ jobs:
           name: aws-emulator-fork-linux-x64
           path: dist
 
+      - name: Fetch the tested provisioner binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: eks-provisioner-linux-x64
+          path: dist
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           mv dist/aws-emulator-fork dist/aws-emulator-fork-linux-x64
+          mv dist/eks-provisioner dist/eks-provisioner-linux-x64
           (cd dist && sha256sum aws-emulator-fork-linux-x64 >aws-emulator-fork-linux-x64.sha256)
+          (cd dist && sha256sum eks-provisioner-linux-x64 >eks-provisioner-linux-x64.sha256)
           version=${TAG#v}
           awk -v heading="## [$version]" 'index($0, heading) == 1 {found = 1; next} found && /^## \[/ {exit} found {print}' \
             fork/CHANGELOG.md >notes.md
@@ -301,8 +382,8 @@ jobs:
             exit 1
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/aws-emulator-fork-linux-x64 dist/aws-emulator-fork-linux-x64.sha256 --clobber
+            gh release upload "$TAG" dist/*-linux-x64 dist/*-linux-x64.sha256 --clobber
           else
-            gh release create "$TAG" dist/aws-emulator-fork-linux-x64 dist/aws-emulator-fork-linux-x64.sha256 \
+            gh release create "$TAG" dist/*-linux-x64 dist/*-linux-x64.sha256 \
               --title "$TAG" --notes-file notes.md --verify-tag
           fi

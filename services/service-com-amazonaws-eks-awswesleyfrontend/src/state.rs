@@ -369,6 +369,44 @@ pub const UPDATE_COMPLETION_DELAY: Duration = Duration::from_millis(500);
 /// instant is stored on the record; nothing sleeps for it.
 pub const CLUSTER_ACTIVATION_DELAY: Duration = Duration::from_millis(500);
 
+/// fork: the environment variable that says who provisions an EKS cluster's control plane.
+pub const CONTROL_PLANE_ENV: &str = "EMULATOR_EKS_CONTROL_PLANE";
+
+/// Who provisions the control plane behind a cluster `CreateCluster` creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlPlaneProvisioning {
+    /// The emulator: the cluster turns `ACTIVE` [`CLUSTER_ACTIVATION_DELAY`] after
+    /// it is created, and no API server answers at its endpoint. The default.
+    Emulated,
+    /// A provisioner outside the emulator (a kind or k3d cluster): the cluster
+    /// stays `CREATING` until that provisioner registers the API server's endpoint
+    /// (`PUT /_fork/eks/clusters/{name}/control-plane`), as an Amazon EKS cluster
+    /// stays `CREATING` until its control plane answers. A cluster nobody
+    /// provisions therefore never turns `ACTIVE`.
+    External,
+}
+
+/// The provisioning [`CONTROL_PLANE_ENV`] names: unset or `emulated` is
+/// [`ControlPlaneProvisioning::Emulated`], `external` is
+/// [`ControlPlaneProvisioning::External`]. Any other value is refused, so a typo
+/// does not silently fall back to clusters whose endpoint answers nothing.
+pub fn control_plane_provisioning(
+    value: Option<&str>,
+) -> Result<ControlPlaneProvisioning, String> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(ControlPlaneProvisioning::Emulated),
+        Some(text) if text.eq_ignore_ascii_case("emulated") => {
+            Ok(ControlPlaneProvisioning::Emulated)
+        }
+        Some(text) if text.eq_ignore_ascii_case("external") => {
+            Ok(ControlPlaneProvisioning::External)
+        }
+        Some(other) => Err(format!(
+            "{CONTROL_PLANE_ENV}={other:?} is neither `emulated` nor `external`"
+        )),
+    }
+}
+
 /// The longest a cluster deletion is treated as IN FLIGHT when the call that
 /// started it never reports back.
 ///
@@ -4600,3 +4638,27 @@ pub use nodegroups::*;
 pub use pass_role::*;
 pub use peers::*;
 pub use store::*;
+
+#[cfg(test)]
+mod control_plane_provisioning_tests {
+    use super::*;
+
+    #[test]
+    fn an_unset_or_empty_variable_leaves_the_control_plane_to_the_emulator() {
+        assert_eq!(control_plane_provisioning(None), Ok(ControlPlaneProvisioning::Emulated));
+        assert_eq!(control_plane_provisioning(Some(" ")), Ok(ControlPlaneProvisioning::Emulated));
+    }
+
+    #[test]
+    fn the_two_named_modes_are_read_in_any_case() {
+        assert_eq!(control_plane_provisioning(Some("Emulated")), Ok(ControlPlaneProvisioning::Emulated));
+        assert_eq!(control_plane_provisioning(Some("EXTERNAL")), Ok(ControlPlaneProvisioning::External));
+    }
+
+    #[test]
+    fn any_other_value_is_refused_with_the_value_named() {
+        let refused = control_plane_provisioning(Some("kind")).expect_err("an unknown mode");
+
+        assert!(refused.contains("\"kind\""), "{refused}");
+    }
+}

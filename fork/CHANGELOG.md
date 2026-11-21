@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Added
+- `EMULATOR_EKS_CONTROL_PLANE=external` leaves an EKS cluster `CREATING` until a provisioner outside the emulator registers its API server with `PUT /_fork/eks/clusters/{name}/control-plane`, which turns it `ACTIVE` with that endpoint; `GET` on the same route answers the cluster's issuer, version and certificate authority, signing key included (#15)
+- `fork/eks-provisioner` runs the control plane of each EKS cluster in kind, signed by the cluster's CA and issuing tokens as its OIDC issuer, joins each node group instance as a node at its private address, authenticates `aws eks get-token` tokens against the cluster's access entries, and deletes the kind cluster with the EKS cluster (#15)
+- A version tag also publishes the provisioner binary, with its SHA-256, on the tag's GitHub release (#15)
+
 ## [0.2.0] - 2026-11-20
 
 ### Added

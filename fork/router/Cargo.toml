@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 aws-emulator-fork-console = { workspace = true }
 aws-emulator-fork-service-account-issuers = { workspace = true }
+aws-emulator-fork-eks-control-plane = { workspace = true }
 aws-emulator-fork-access-log = { workspace = true }
 aws-emulator-fork-iam-gate = { workspace = true }
 engine = { workspace = true }
