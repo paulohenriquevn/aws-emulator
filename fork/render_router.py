@@ -65,6 +65,7 @@ path = "src/main.rs"
 [dependencies]
 aws-emulator-fork-console = {{ workspace = true }}
 aws-emulator-fork-service-account-issuers = {{ workspace = true }}
+aws-emulator-fork-eks-control-plane = {{ workspace = true }}
 aws-emulator-fork-access-log = {{ workspace = true }}
 aws-emulator-fork-iam-gate = {{ workspace = true }}
 engine = {{ workspace = true }}
@@ -117,10 +118,11 @@ def render_lib(services: list[str]) -> str:
         + "];\n\n"
         + "/// The mounted services behind the fork's own routes, which are answered before\n"
         + "/// service dispatch: the console, and the registration of an external cluster's\n"
-        + "/// service account key set (which checks its own SigV4 signature). Every other\n"
-        + "/// request falls through to the services.\n"
+        + "/// service account key set and of an external control plane (each checks its own\n"
+        + "/// SigV4 signature). Every other request falls through to the services.\n"
         + "pub fn build_router(engine: Arc<InMemoryEngine>) -> WithExtraRoutes<MultiServiceRouter> {\n"
         + "    let issuers = Arc::clone(&engine);\n"
+        + "    let control_planes = Arc::clone(&engine);\n"
         + "    WithExtraRoutes::new(build_services(engine))\n"
         + "        .route_matching(aws_emulator_fork_console::claims, |request| async move {\n"
         + "            aws_emulator_fork_console::respond(&request)\n"
@@ -128,6 +130,10 @@ def render_lib(services: list[str]) -> str:
         + "        .route_matching(aws_emulator_fork_service_account_issuers::claims, move |request| {\n"
         + "            let engine = Arc::clone(&issuers);\n"
         + "            async move { aws_emulator_fork_service_account_issuers::respond(&engine, &request) }\n"
+        + "        })\n"
+        + "        .route_matching(aws_emulator_fork_eks_control_plane::claims, move |request| {\n"
+        + "            let engine = Arc::clone(&control_planes);\n"
+        + "            async move { aws_emulator_fork_eks_control_plane::respond(&engine, &request) }\n"
         + "        })\n}\n\n"
         + "/// The mounted services alone, without the console route. Tests use it to turn\n"
         + "/// request authentication off and call `dispatch` directly.\n"

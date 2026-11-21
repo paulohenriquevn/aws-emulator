@@ -14,6 +14,8 @@ account. Everything the fork adds lives in this directory, plus a few patches in
 | `console/` | The read-only web console the binary serves at `/_console/`: a React app in `console/web` and the crate that embeds its build. |
 | `acceptance/` | Eight Terraform fixtures (billing, compute, data, edge, network, operations, registry, security) and `run.sh`, which runs each one against a fresh emulator. |
 | `service-account-issuers/` | The route that registers a Kubernetes cluster's service account key set for an EKS cluster of the emulator. |
+| `eks-provisioner/` | A Go program that runs, for every EKS cluster of the emulator, its control plane and its node group instances in kind, and answers the API servers' token reviews from the cluster's access entries (see EKS clusters through the API). |
+| `eks-control-plane/` | The route a provisioner outside the emulator reads an EKS cluster's issuer and CA from, and registers the API server it brought up with (see External control planes). |
 | `iam-gate/` | Judges every signed call against the caller's IAM policies when `EMULATOR_IAM_ENFORCE=on` (see IAM on every service). |
 | `access-log/` | Logs one line per request the binary answers (`RUST_LOG=info,access=debug`): the operation, its status and error code, and how long it took. |
 | `kubernetes/` | `run.sh`, which runs real in-cluster controllers and workload identity in a kind cluster against the emulator, with the manifests and chart values it applies. |
@@ -146,6 +148,100 @@ It needs docker, kind, kubectl, helm, the AWS CLI v2, curl, jq, openssl and git,
 access for images and charts. The emulator listens on the gateway of kind's Docker network
 (`-b`), and every pod that calls it mounts its CA. The `kubernetes` job of the workflow runs it.
 
+### External control planes
+
+With `EMULATOR_EKS_CONTROL_PLANE=external`, the emulator leaves an EKS cluster's control plane to
+a provisioner outside it, as Amazon EKS provisions one behind its API. `CreateCluster` answers
+and the cluster stays `CREATING` until that provisioner registers the API server it brought up;
+`DescribeCluster` reports no `endpoint`, `identity` or certificate data until then, which is what
+tells a client (Terraform's `aws_eks_cluster`, `aws eks wait cluster-active`) to keep waiting.
+Unset or `emulated`, the clock activates the cluster as before. Any other value fails
+`CreateCluster` with a `ServerException` that names it.
+
+The provisioner reads what it needs while the cluster is `CREATING`:
+
+```bash
+curl --cacert "$AWS_CA_BUNDLE" --aws-sigv4 aws:amz:us-east-1:eks --user "$KEY:$SECRET" \
+  "$AWS_ENDPOINT_URL/_fork/eks/clusters/<cluster>/control-plane"
+# {"name", "status", "version", "issuer", "endpoint",
+#  "certificateAuthority": {"id", "data", "signingKey"}}
+```
+
+`certificateAuthority` is the CA Amazon EKS issued the cluster: `data` is the Base64 PEM
+certificate `DescribeCluster` reports, and `signingKey` its PEM private key. The API server's
+certificates are signed with it (kubeadm uses an existing `ca.crt` and `ca.key`), so a
+kubeconfig built from `DescribeCluster` trusts the real API server. No AWS operation reports the
+key; only this route does, to requests signed with the emulator's own keys.
+
+Then it registers the API server:
+
+```bash
+curl --cacert "$AWS_CA_BUNDLE" --aws-sigv4 aws:amz:us-east-1:eks --user "$KEY:$SECRET" \
+  -X PUT --data '{"endpoint": "https://172.29.1.20:6443"}' \
+  "$AWS_ENDPOINT_URL/_fork/eks/clusters/<cluster>/control-plane"
+```
+
+The cluster turns `ACTIVE` and reports that endpoint. The endpoint must be `https://host[:port]`
+with no path (400 otherwise); a connected cluster is refused with 400, a `DELETING` one with 409,
+and an unknown one with 404. Registering again updates the endpoint, and works the same on a
+cluster the clock activated.
+
+Not modelled: a successor CA activated with `ActivateCertificateAuthority` is not rolled into a
+running control plane. The route hands out the CA that is signing, so a control plane rebuilt
+after the activation uses it.
+
+### EKS clusters through the API
+
+`fork/eks-provisioner` turns the EKS API into working Kubernetes clusters, so Terraform's
+`aws_eks_cluster` and `aws_eks_node_group` (or any client of the API) get clusters that a
+kubeconfig from `aws eks update-kubeconfig` reaches. Run the emulator with
+`EMULATOR_EKS_CONTROL_PLANE=external` and the provisioner beside it, with the same AWS
+environment a client of the emulator uses:
+
+```bash
+AWS_ENDPOINT_URL=https://172.29.0.1:9597 AWS_CA_BUNDLE=... AWS_SHARED_CREDENTIALS_FILE=.../emulator_credentials \
+  eks-provisioner --regions us-east-1 --state-dir /var/lib/aws-emulator-eks --listen :9598
+```
+
+Every few seconds it reconciles each Region:
+
+| EKS | What the provisioner does |
+|---|---|
+| A cluster is `CREATING` | Creates a network interface in the cluster's first subnet (`Amazon EKS <cluster>`), and a kind control plane on the VPC's Docker network that signs with the cluster's CA, issues service account tokens as its OIDC issuer and answers at the interface's address on port 6443. Registers the service account key set and the endpoint, which turns the cluster `ACTIVE`. |
+| A node group instance is `running` | Runs a kind node container at the instance's private address, named after its private DNS name, and joins it with the instance's providerID, the node group's labels and taints, and the `eks.amazonaws.com/nodegroup` label. |
+| An instance is gone | Deletes its Node and its container. |
+| The cluster is gone | Deletes the kind cluster and the network interface. |
+
+The VPC's Docker network has the VPC's CIDR and hands out container addresses only from the
+highest /27 no subnet covers, so it never hands out an address EC2 assigns. A network that
+already has the VPC's CIDR is used as it is.
+
+The API servers authenticate a bearer token through the provisioner (`--listen`, which they
+dial at the gateway of their VPC's network): the token's presigned `GetCallerIdentity` is sent
+to the emulator's STS with the cluster's name, and the caller's principal (an assumed-role
+session is its role) must have an access entry on the cluster. Its username and Kubernetes
+groups are the entry's, and each associated access policy binds its ClusterRole:
+`AmazonEKSClusterAdminPolicy` is `cluster-admin`, `AmazonEKSAdminPolicy` `admin`,
+`AmazonEKSEditPolicy` `edit` and `AmazonEKSViewPolicy` `view`, cluster-wide or in the
+namespaces of its scope. The principal that created the cluster has the cluster-admin entry
+`CreateCluster` gives it.
+
+`fork/eks-provisioner/e2e.sh <emulator> <provisioner>` creates a cluster and a node group with
+the AWS CLI, waits for them to turn `ACTIVE`, lists the instances as Ready nodes with a
+kubeconfig from `aws eks update-kubeconfig`, checks a role with no access entry is refused,
+and deletes everything.
+
+Limits:
+
+- Kubernetes 1.31 to 1.35, the versions kind v0.31.0 has node images for. A cluster of
+  another version stays `CREATING` and the provisioner logs the versions it supports.
+- A cluster name must be a valid kind cluster name: lowercase letters, digits, `-` and `.`.
+- Nodes join with a kubeadm bootstrap token, not as the node role's access entry, and the
+  control plane is a Node of the cluster too, tainted `NoSchedule`.
+- Pods take addresses from `100.64.0.0/16`, not from the VPC: kind's CNI is not the Amazon
+  VPC CNI. A pod's traffic leaves its node from the instance's address.
+- Clusters are created one after another; each takes about a minute.
+
 ## IAM on every service
 
 Upstream asks IAM only from IAM itself, Secrets Manager, ACM and part of KMS; every other service
@@ -270,6 +366,7 @@ upstream ships the fix.
 | EKS | `CreateNodegroup` launches `desiredSize` EC2 instances of the Amazon EKS optimized AL2023 AMI over the node group's subnets, tagged `eks:cluster-name` and `eks:nodegroup-name`, and `DeleteNodegroup` terminates them (`src/state/nodegroup_instances.rs`). No Auto Scaling group is created, and `UpdateNodegroupConfig` launches or terminates nothing | not reported yet |
 | RDS, ElastiCache (and core listeners) | A container-backed endpoint closes a connection its VPC security groups do not admit (RDS `src/state/data_plane/postgres_container.rs`, ElastiCache `src/state/redis_container.rs`, EC2 `src/state/connection_firewall.rs`, `vendor/server/src/listeners.rs`) | not reported yet |
 | Price List | EC2 instance products carry the `marketoption` attribute (`OnDemand`) | not reported yet |
+| EKS | `EMULATOR_EKS_CONTROL_PLANE=external` leaves a cluster `CREATING` until an external provisioner registers its API server, and a cluster CA's signing key is kept on its record (`src/ops/create_cluster.rs`, `src/state/certificate_material.rs`) | not reported yet |
 | EC2 | Each state an instance moves into is published on EventBridge as an `EC2 Instance State-change Notification`, including the states the clock moves it into | [aws/aws-emulator#549](https://github.com/aws/aws-emulator/issues/549) |
 
 To find every patch: `git grep -n 'fork:' -- services vendor core`.
