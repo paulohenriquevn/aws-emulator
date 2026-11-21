@@ -16,6 +16,7 @@
 
 use aws_emulator_fork_router::{build_router, InMemoryEngine};
 use bytes::Bytes;
+use emulator_server::EmulatorService;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
