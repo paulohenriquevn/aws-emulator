@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -65,9 +64,8 @@ func parseToken(token string, stsHosts []string, now time.Time) (presignedIdenti
 	if age := now.Sub(signedAt); age > maxTokenAge || age < -maxTokenAge {
 		return presignedIdentity{}, fmt.Errorf("the token was signed at %s, more than %s from now", signedAt.Format(time.RFC3339), maxTokenAge)
 	}
-	if expires, err := strconv.Atoi(query.Get("X-Amz-Expires")); err == nil && now.After(signedAt.Add(time.Duration(expires)*time.Second)) {
-		return presignedIdentity{}, fmt.Errorf("the token expired at %s", signedAt.Add(time.Duration(expires)*time.Second).Format(time.RFC3339))
-	}
+	// X-Amz-Expires is not the token's lifetime: aws eks get-token presigns for 60 seconds
+	// and kubectl keeps the token for 14 minutes, which Amazon EKS accepts.
 	return presignedIdentity{URL: presigned}, nil
 }
 

@@ -246,12 +246,14 @@ pods created before any node has joined, and the cluster turns `ACTIVE` only onc
 available. Its serving certificate is signed by the provisioner's `webhook-ca.crt`, which the
 API server trusts already, and kept in the cluster's state directory.
 
-The endpoint webhook leaves alone a pod in `kube-system` and a pod with a container that sets
-`AWS_ENDPOINT_URL`, and a variable a container sets itself keeps its value. Its
-`failurePolicy` is `Fail`: while the provisioner is down a pod outside `kube-system` is
-refused, and its controller creates it again, rather than started with no endpoint and sent
-to `*.amazonaws.com`. `kube-system` is excluded so the cluster's own components keep
-starting meanwhile. The ConfigMap is created in the pod's namespace while the pod is admitted
+The endpoint webhook leaves alone a pod with a container that sets `AWS_ENDPOINT_URL`, and a
+variable a container sets itself keeps its value. Its `failurePolicy` is `Fail`: while the
+provisioner is down a pod outside `kube-system` is refused, and its controller creates it
+again, rather than started with no endpoint and sent to `*.amazonaws.com`. In `kube-system`
+only a pod with an IRSA role gets the endpoint (the AWS Load Balancer Controller, for
+instance), through a second webhook whose `failurePolicy` is `Ignore`, so the cluster's own
+components keep starting while the provisioner is down; it is called again after the pod
+identity webhook gives a pod its role. The ConfigMap is created in the pod's namespace while the pod is admitted
 (not on a dry run), and named after its content (`aws-emulator-ca-<hash>`, immutable), so a
 namespace created a moment earlier already has it, and a changed CA is a new ConfigMap that
 new pods mount. The public roots are the host's bundle (`--system-roots`, by default
@@ -394,6 +396,7 @@ upstream ships the fix.
 | ACM | One DNS validation CNAME for a wildcard and its apex | aws/aws-emulator#536 |
 | SSM | EKS optimized AL2023 AMI parameters | aws/aws-emulator#535 |
 | TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |
+| STS | A presigned `GetCallerIdentity`, an EKS token's request, is valid for 15 minutes from `X-Amz-Date` whatever its `X-Amz-Expires`, as STS accepts it (`vendor/server/src/request_authentication.rs`) | not reported yet |
 | RDS (and core listeners) | An instance created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves it, so `Endpoint.Port` matches it | aws/aws-emulator#537 |
 | Core router | `MultiServiceRouter` runs an installed `RequestAuthorizer` after request authentication (`vendor/smithy-server-runtime/src/multi_service_router.rs`), which `iam-gate/` installs | not reported yet |
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |

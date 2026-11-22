@@ -168,6 +168,30 @@ func TestPodsInKubeSystemAreLeftAlone(t *testing.T) {
 	}
 }
 
+func TestAKubeSystemPodWithAnIRSARoleGetsTheEmulatorsEndpoint(t *testing.T) {
+	// The AWS Load Balancer Controller runs in kube-system with an IRSA role: without the
+	// endpoint it exchanges its token at the real STS.
+	pod := appPod()
+	pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{Name: "AWS_ROLE_ARN", Value: "arn:aws:iam::000000000000:role/lb-controller"})
+
+	got := patched(t, "kube-system", pod)
+
+	if envOf(got.Spec.Containers[0])["AWS_ENDPOINT_URL"] == nil {
+		t.Fatalf("a kube-system pod with an IRSA role got no endpoint: %+v", got.Spec.Containers[0].Env)
+	}
+}
+
+func TestAKubeSystemPodWithTheIRSATokenVolumeGetsTheEmulatorsEndpoint(t *testing.T) {
+	pod := appPod()
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: "aws-iam-token"})
+
+	got := patched(t, "kube-system", pod)
+
+	if envOf(got.Spec.Containers[1])["AWS_ENDPOINT_URL"] == nil {
+		t.Fatalf("a kube-system pod with the IRSA token volume got no endpoint")
+	}
+}
+
 func TestAPodPatchedOnceIsNotPatchedAgain(t *testing.T) {
 	pod := patched(t, "default", appPod())
 

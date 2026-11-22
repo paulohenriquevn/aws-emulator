@@ -158,6 +158,16 @@ if AWS_ACCESS_KEY_ID=$key AWS_SECRET_ACCESS_KEY=$secret AWS_SESSION_TOKEN=$sessi
 fi
 say "a role with no access entry is refused"
 
+# aws eks get-token presigns for 60 seconds and kubectl reuses the token for 14 minutes:
+# STS and Amazon EKS accept it for 15 minutes from X-Amz-Date. The token is used for the
+# first time after its presign expiry, so no API server cache has seen it.
+TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --query status.token --output text)
+aws eks describe-cluster --name "$CLUSTER" --query cluster.certificateAuthority.data --output text | base64 -d >"$WORK/cluster-ca.pem"
+sleep 70
+status=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$WORK/cluster-ca.pem" -H "Authorization: Bearer $TOKEN" "$ENDPOINT/version")
+[[ $status == 200 ]] || fail "a token first used 70 seconds after aws eks get-token was refused with $status"
+say "a token is accepted after its 60 second presign expiry"
+
 aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NODEGROUP" >>"$LOG"
 aws eks wait nodegroup-deleted --cluster-name "$CLUSTER" --nodegroup-name "$NODEGROUP"
 aws eks delete-cluster --name "$CLUSTER" >>"$LOG"

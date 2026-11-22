@@ -129,8 +129,10 @@ func podIdentityWebhookConfiguration(caPEM []byte) *admissionregistrationv1.Muta
 // kube-system. A pod admitted while the provisioner is down would call *.amazonaws.com
 // with nothing to say so, so the API server refuses it instead (failurePolicy Fail) and
 // its controller creates it again; kube-system is excluded so the cluster's own
-// components keep starting meanwhile. The webhook creates the CA ConfigMap a pod mounts,
-// which it does not do on a dry run (NoneOnDryRun).
+// components keep starting meanwhile. A second webhook takes kube-system with
+// failurePolicy Ignore, for its pods with an IRSA role, and is called again after the pod
+// identity webhook gives a pod its role (reinvocationPolicy IfNeeded). The webhook creates
+// the CA ConfigMap a pod mounts, which it does not do on a dry run (NoneOnDryRun).
 func endpointWebhookConfiguration(url string, caPEM []byte) *admissionregistrationv1.MutatingWebhookConfiguration {
 	fail := admissionregistrationv1.Fail
 	sideEffects := admissionregistrationv1.SideEffectClassNoneOnDryRun
@@ -139,6 +141,8 @@ func endpointWebhookConfiguration(url string, caPEM []byte) *admissionregistrati
 	for namespace := range excludedNamespaces {
 		excluded = append(excluded, namespace)
 	}
+	ignore := admissionregistrationv1.Ignore
+	reinvoke := admissionregistrationv1.IfNeededReinvocationPolicy
 	return &admissionregistrationv1.MutatingWebhookConfiguration{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "admissionregistration.k8s.io/v1", Kind: "MutatingWebhookConfiguration"},
 		ObjectMeta: objectMeta(endpointWebhookName, ""),
@@ -148,6 +152,18 @@ func endpointWebhookConfiguration(url string, caPEM []byte) *admissionregistrati
 			FailurePolicy: &fail,
 			NamespaceSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
 				{Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpNotIn, Values: excluded},
+			}},
+			Rules:                   []admissionregistrationv1.RuleWithOperations{podCreation()},
+			SideEffects:             &sideEffects,
+			TimeoutSeconds:          &timeout,
+			AdmissionReviewVersions: []string{"v1"},
+		}, {
+			Name:               "system-endpoint.eks-provisioner.aws-emulator.internal",
+			ClientConfig:       admissionregistrationv1.WebhookClientConfig{URL: &url, CABundle: caPEM},
+			FailurePolicy:      &ignore,
+			ReinvocationPolicy: &reinvoke,
+			NamespaceSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+				{Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpIn, Values: excluded},
 			}},
 			Rules:                   []admissionregistrationv1.RuleWithOperations{podCreation()},
 			SideEffects:             &sideEffects,

@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `fork/eks-provisioner/e2e.sh` checks that a pod with an IRSA service account and no AWS variable of its own is the role for `aws sts get-caller-identity` (#15)
 
 ### Fixed
+- An EKS token is accepted for 15 minutes from its signing, as Amazon EKS and STS accept it: the emulator's STS and the provisioner refused it once its 60 second presign expiry passed, so a long `helm --wait` failed with `Unauthorized` (#15)
+- A `kube-system` pod with an IRSA role, such as the AWS Load Balancer Controller, gets the emulator's endpoint and CA, instead of exchanging its token at the real STS (#15)
 - `fork/eks-provisioner` tears down only the kind clusters it keeps a state directory for, and `e2e.sh` deletes only its own kind cluster and Docker network, so neither removes the clusters of another provisioner on the same host; the Docker network it creates for a VPC carries the VPC's CIDR in its name, so a second emulator's VPC with the same id gets a network of its own (#15)
 - EC2 `DescribeTags` reports the tags `CreateTags` writes, each with its key, value, resource id and resource type, filtered by `key`, `value`, `resource-id`, `resource-type` and `tag:<key>` and paged by `MaxResults` (5 to 1000) and `NextToken`; it answered 501 for every request, so `aws_ec2_tag` could not apply (#16)
 

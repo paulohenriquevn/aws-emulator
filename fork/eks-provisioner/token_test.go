@@ -51,10 +51,20 @@ func TestATokenThatSignsNoClusterIsRefused(t *testing.T) {
 	}
 }
 
-func TestAnExpiredTokenIsRefused(t *testing.T) {
-	_, err := parseToken(token(presignedURL(testSTSHost, "host%3Bx-k8s-aws-id")), []string{testSTSHost}, signedAt.Add(2*time.Minute))
+func TestATokenIsAcceptedForFifteenMinutesWhateverItsPresignExpiry(t *testing.T) {
+	// aws eks get-token presigns for 60 seconds and kubectl keeps the token for 14 minutes:
+	// Amazon EKS accepts it for 15 minutes from X-Amz-Date, as aws-iam-authenticator does.
+	_, err := parseToken(token(presignedURL(testSTSHost, "host%3Bx-k8s-aws-id")), []string{testSTSHost}, signedAt.Add(14*time.Minute))
 
-	if err == nil || !strings.Contains(err.Error(), "expired") {
+	if err != nil {
+		t.Fatalf("a token signed 14 minutes ago was refused: %v", err)
+	}
+}
+
+func TestATokenOlderThanFifteenMinutesIsRefused(t *testing.T) {
+	_, err := parseToken(token(presignedURL(testSTSHost, "host%3Bx-k8s-aws-id")), []string{testSTSHost}, signedAt.Add(16*time.Minute))
+
+	if err == nil || !strings.Contains(err.Error(), "more than 15m0s") {
 		t.Fatalf("got %v", err)
 	}
 }

@@ -92,6 +92,32 @@ func TestTheEndpointWebhookIsNotCalledForKubeSystem(t *testing.T) {
 	}
 }
 
+func TestKubeSystemIsSentToTheEndpointWebhookOnlyWhereItsAbsenceIsHarmless(t *testing.T) {
+	webhooks := endpointWebhookConfiguration("https://10.40.0.1:9598/mutate/us-east-1/core", []byte("ca")).Webhooks
+	if len(webhooks) != 2 {
+		t.Fatalf("got %d webhooks, want the general one and the kube-system one", len(webhooks))
+	}
+	system := webhooks[1]
+
+	selects := false
+	for _, expression := range system.NamespaceSelector.MatchExpressions {
+		if expression.Key == "kubernetes.io/metadata.name" && expression.Operator == metav1.LabelSelectorOpIn && contains(expression.Values, "kube-system") {
+			selects = true
+		}
+	}
+	if !selects {
+		t.Errorf("the second webhook does not select kube-system: %+v", system.NamespaceSelector)
+	}
+	// CoreDNS and the pod identity webhook start while the provisioner is down.
+	if system.FailurePolicy == nil || *system.FailurePolicy != admissionregistrationv1.Ignore {
+		t.Errorf("failurePolicy is %v, want Ignore", system.FailurePolicy)
+	}
+	// It decides on the IRSA variables the pod identity webhook adds, so it runs again after it.
+	if system.ReinvocationPolicy == nil || *system.ReinvocationPolicy != admissionregistrationv1.IfNeededReinvocationPolicy {
+		t.Errorf("reinvocationPolicy is %v, want IfNeeded", system.ReinvocationPolicy)
+	}
+}
+
 func writeFile(t *testing.T, path, content string) string {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

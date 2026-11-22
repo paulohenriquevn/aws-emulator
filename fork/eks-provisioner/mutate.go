@@ -24,7 +24,27 @@ const (
 
 // excludedNamespaces are left as Amazon EKS leaves them: the cluster's own components
 // run there and keep starting while the provisioner, which serves this webhook, is down.
+// A pod there that has an IRSA role (the AWS Load Balancer Controller, the EBS CSI
+// driver) still gets the endpoint, or it would exchange its token at the real STS.
 var excludedNamespaces = map[string]bool{"kube-system": true}
+
+// irsaTokenVolume is the volume amazon-eks-pod-identity-webhook adds for the role's token.
+const irsaTokenVolume = "aws-iam-token"
+
+// hasIRSARole is whether the pod identity webhook gave pod a role.
+func hasIRSARole(pod *corev1.Pod) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == irsaTokenVolume {
+			return true
+		}
+	}
+	for _, container := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		if setsVariable(container, "AWS_ROLE_ARN") {
+			return true
+		}
+	}
+	return false
+}
 
 var podsResource = metav1.GroupVersionResource{Version: "v1", Resource: "pods"}
 
@@ -61,9 +81,9 @@ func (injection endpointInjection) environment() []corev1.EnvVar {
 
 // patch is the JSON patch that gives every container and init container of pod the
 // emulator's endpoint and CA, or nil when the pod is left alone: it runs in an excluded
-// namespace, already names an endpoint of its own, or was patched already.
+// namespace with no IRSA role, already names an endpoint of its own, or was patched already.
 func (injection endpointInjection) patch(namespace string, pod *corev1.Pod) []patchOperation {
-	if excludedNamespaces[namespace] {
+	if excludedNamespaces[namespace] && !hasIRSARole(pod) {
 		return nil
 	}
 	for _, volume := range pod.Spec.Volumes {
