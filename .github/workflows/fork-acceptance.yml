@@ -109,6 +109,7 @@ jobs:
           -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
           --test all --
           network_acl_tags
+          describe_tags
           security_group_all_protocols_revoke
           wildcard_dns_validation_record
           public_eks_optimized_ami_hierarchies

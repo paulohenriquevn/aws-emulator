@@ -2140,11 +2140,45 @@ pub use iam_instance_profile_associations::*;
 /// keeps that shape on a member, beside the facts the shape carries no member for. A
 /// resource kind is taggable exactly when it is named here, so this list is the one place
 /// the tag operations' reach is written down.
+///
+/// fork: each store also names the `ResourceType` its resources are tagged as
+/// (`: "resource-type"`), which [`tagged_resource_rows`] reports and this ignores; the list
+/// itself is written once, in `taggable_resource_stores!`
+/// (`src/state/instance_ids_and_instance_types.rs`), so `DescribeTags` reports exactly the
+/// resources `CreateTags` and `DeleteTags` reach.
 macro_rules! resource_tag_lists {
-    ($store:ident, $id:ident, $($field:ident $(=> $member:ident)?),+ $(,)?) => {
+    (
+        $store:ident,
+        $id:ident,
+        $($field:ident $(=> $member:ident)? : $resource_type:literal),+ $(,)?
+    ) => {
         $(
             if let Some(record) = $store.$field.get_mut($id) {
                 return Some(ResourceTagsMut::List(&mut record $(.$member)?.tags));
+            }
+        )+
+    };
+}
+
+/// fork: every resource of the stores `taggable_resource_stores!` names, pushed onto `$rows`
+/// as a [`TaggedResource`] that carries the `ResourceType` the list names its store by, for
+/// [`ComAmazonawsEc2Amazonec2State::tagged_resources`].
+///
+/// The read-only counterpart of [`resource_tag_lists`], expanded over the same list, so a
+/// store that becomes taggable there becomes describable here at once.
+macro_rules! tagged_resource_rows {
+    (
+        $store:ident,
+        $rows:ident,
+        $($field:ident $(=> $member:ident)? : $resource_type:literal),+ $(,)?
+    ) => {
+        $(
+            for (resource_id, record) in $store.$field.iter() {
+                $rows.push(TaggedResource::from_list(
+                    resource_id,
+                    $resource_type,
+                    record $(.$member)?.tags.as_deref().unwrap_or_default(),
+                ));
             }
         )+
     };
@@ -2488,6 +2522,9 @@ mod instances_and_filters;
 pub mod instance_state_events;
 // fork: security groups applied to connections to RDS and ElastiCache endpoints.
 pub mod connection_firewall;
+// fork: the tags of every taggable resource, as `DescribeTags` reports them.
+mod tag_descriptions;
+pub use tag_descriptions::*;
 mod vpcs_and_security_groups;
 mod store;
 /// The bundle-task store's identity and refusals: the prefix a bundle task id carries, the

@@ -9,6 +9,95 @@
 
 use super::*;
 
+/// fork: the stores whose resources carry the modelled `Tag` list, each with the
+/// `ResourceType` a `TagSpecification` names its resources by, handed to `$callback` after
+/// the tokens `$prefix` carries.
+///
+/// Written ONCE so the two readers of the list cannot drift apart: `resource_tag_lists!`
+/// resolves one id against it for `CreateTags` and `DeleteTags`
+/// ([`ComAmazonawsEc2Amazonec2State::resource_tags_mut`]), and `tagged_resource_rows!`
+/// walks it for `DescribeTags` ([`ComAmazonawsEc2Amazonec2State::tagged_resources`]). A
+/// store added here is taggable and describable at once. The resource types are the
+/// `ResourceType` enum values of this checkout's model; `addresses` are `elastic-ip` and
+/// `managed_prefix_lists` are `prefix-list`, the names that enum gives them.
+macro_rules! taggable_resource_stores {
+    ($callback:ident!($($prefix:tt)*)) => {
+        $callback!(
+            $($prefix)*
+            addresses: "elastic-ip",
+            capacity_reservation_fleets => view: "capacity-reservation-fleet",
+            capacity_reservation_cancellation_quotes => view: "capacity-reservation-cancellation-quote",
+            capacity_reservations => view: "capacity-reservation",
+            carrier_gateways: "carrier-gateway",
+            client_vpn_endpoints: "client-vpn-endpoint",
+            coip_pools: "coip-pool",
+            customer_gateways => view: "customer-gateway",
+            dedicated_hosts: "dedicated-host",
+            dhcp_options: "dhcp-options",
+            export_image_tasks => view: "export-image-task",
+            export_tasks => view: "export-instance-task",
+            fleets => fleet: "fleet",
+            fpga_images => view: "fpga-image",
+            images: "image",
+            import_image_tasks => view: "import-image-task",
+            import_snapshot_tasks: "import-snapshot-task",
+            internet_gateways: "internet-gateway",
+            ipam_policies => view: "ipam-policy",
+            ipam_pools: "ipam-pool",
+            ipam_resource_discoveries: "ipam-resource-discovery",
+            ipam_resource_discovery_associations: "ipam-resource-discovery-association",
+            ipam_scopes: "ipam-scope",
+            ipams: "ipam",
+            launch_templates => template: "launch-template",
+            local_gateway_route_table_virtual_interface_group_associations => view: "local-gateway-route-table-virtual-interface-group-association",
+            local_gateway_route_table_vpc_associations => view: "local-gateway-route-table-vpc-association",
+            local_gateway_route_tables => view: "local-gateway-route-table",
+            mac_modification_tasks => view: "mac-modification-task",
+            managed_prefix_lists => view: "prefix-list",
+            nat_gateways: "natgateway",
+            // fork: network ACLs, the default one included (aws/aws-emulator#76).
+            network_acls: "network-acl",
+            network_insights_access_scope_analyses => view: "network-insights-access-scope-analysis",
+            network_insights_access_scopes: "network-insights-access-scope",
+            network_insights_analyses => view: "network-insights-analysis",
+            network_insights_paths: "network-insights-path",
+            placement_groups: "placement-group",
+            replace_root_volume_tasks => view: "replace-root-volume-task",
+            reserved_instances: "reserved-instances",
+            route_server_endpoints: "route-server-endpoint",
+            route_server_peers: "route-server-peer",
+            route_servers => view: "route-server",
+            route_tables: "route-table",
+            secondary_interfaces: "secondary-interface",
+            secondary_networks => view: "secondary-network",
+            secondary_subnets: "secondary-subnet",
+            security_groups: "security-group",
+            snapshots => view: "snapshot",
+            spot_instance_requests => view: "spot-instances-request",
+            spot_fleet_requests => view: "spot-fleet-request",
+            subnet_cidr_reservations: "subnet-cidr-reservation",
+            subnets: "subnet",
+            traffic_mirror_filters: "traffic-mirror-filter",
+            traffic_mirror_sessions: "traffic-mirror-session",
+            transit_gateway_connect_peers => view: "transit-gateway-connect-peer",
+            transit_gateway_metering_policies: "transit-gateway-metering-policy",
+            transit_gateway_policy_tables => view: "transit-gateway-policy-table",
+            transit_gateway_route_tables: "transit-gateway-route-table",
+            transit_gateways: "transit-gateway",
+            verified_access_endpoints => view: "verified-access-endpoint",
+            verified_access_groups => view: "verified-access-group",
+            volumes => view: "volume",
+            vpc_block_public_access_exclusions => view: "vpc-block-public-access-exclusion",
+            vpc_endpoint_services: "vpc-endpoint-service",
+            vpc_endpoints: "vpc-endpoint",
+            vpc_peering_connections => view: "vpc-peering-connection",
+            vpcs: "vpc",
+            vpn_connections => view: "vpn-connection",
+            vpn_gateways => view: "vpn-gateway",
+        )
+    };
+}
+
 impl ComAmazonawsEc2Amazonec2State {
     /// The tags of the resource `resource_id` names, whatever kind of resource that is, or
     /// `None` when this store holds no resource under that id.
@@ -16,8 +105,8 @@ impl ComAmazonawsEc2Amazonec2State {
     /// `CreateTags` and `DeleteTags` act on a resource id without being told its kind, so
     /// this is where an id is resolved against every store that holds a taggable resource.
     /// Both reach a resource's tags ONLY through here, so neither can accept an id the
-    /// other refuses, and a store added to the list below becomes taggable for both at
-    /// once.
+    /// other refuses, and a store added to the list (`taggable_resource_stores!` above)
+    /// becomes taggable for both at once.
     pub fn resource_tags_mut(&mut self, resource_id: &str) -> Option<ResourceTagsMut<'_>> {
         let store = self;
         // The instance record keeps its tags as a map rather than as the modelled list,
@@ -31,81 +120,37 @@ impl ComAmazonawsEc2Amazonec2State {
         if let Some(interface) = store.network_interfaces.get_mut(resource_id) {
             return Some(ResourceTagsMut::List(&mut interface.tag_set));
         }
-        resource_tag_lists!(
-            store,
-            resource_id,
-            addresses,
-            capacity_reservation_fleets => view,
-            capacity_reservation_cancellation_quotes => view,
-            capacity_reservations => view,
-            carrier_gateways,
-            client_vpn_endpoints,
-            coip_pools,
-            customer_gateways => view,
-            dedicated_hosts,
-            dhcp_options,
-            export_image_tasks => view,
-            export_tasks => view,
-            fleets => fleet,
-            fpga_images => view,
-            images,
-            import_image_tasks => view,
-            import_snapshot_tasks,
-            internet_gateways,
-            ipam_policies => view,
-            ipam_pools,
-            ipam_resource_discoveries,
-            ipam_resource_discovery_associations,
-            ipam_scopes,
-            ipams,
-            launch_templates => template,
-            local_gateway_route_table_virtual_interface_group_associations => view,
-            local_gateway_route_table_vpc_associations => view,
-            local_gateway_route_tables => view,
-            mac_modification_tasks => view,
-            managed_prefix_lists => view,
-            nat_gateways,
-            // fork: network ACLs, the default one included (aws/aws-emulator#76).
-            network_acls,
-            network_insights_access_scope_analyses => view,
-            network_insights_access_scopes,
-            network_insights_analyses => view,
-            network_insights_paths,
-            placement_groups,
-            replace_root_volume_tasks => view,
-            reserved_instances,
-            route_server_endpoints,
-            route_server_peers,
-            route_servers => view,
-            route_tables,
-            secondary_interfaces,
-            secondary_networks => view,
-            secondary_subnets,
-            security_groups,
-            snapshots => view,
-            spot_instance_requests => view,
-            spot_fleet_requests => view,
-            subnet_cidr_reservations,
-            subnets,
-            traffic_mirror_filters,
-            traffic_mirror_sessions,
-            transit_gateway_connect_peers => view,
-            transit_gateway_metering_policies,
-            transit_gateway_policy_tables => view,
-            transit_gateway_route_tables,
-            transit_gateways,
-            verified_access_endpoints => view,
-            verified_access_groups => view,
-            volumes => view,
-            vpc_block_public_access_exclusions => view,
-            vpc_endpoint_services,
-            vpc_endpoints,
-            vpc_peering_connections => view,
-            vpcs,
-            vpn_connections => view,
-            vpn_gateways => view,
-        );
+        taggable_resource_stores!(resource_tag_lists!(store, resource_id,));
         None
+    }
+
+    /// fork: every resource [`Self::resource_tags_mut`] resolves, with the `ResourceType`
+    /// of its kind and its tags, for `DescribeTags` (paulohenriquevn/aws-emulator#16).
+    ///
+    /// Read off the same stores in the same way: the instances and the network interfaces
+    /// on their own, and every other kind through the one list `taggable_resource_stores!`
+    /// writes down, so a resource `CreateTags` can tag is a resource this reports. A
+    /// resource carrying no tag is reported too, with no pairs; which rows to answer is the
+    /// caller's business. In no particular order: the caller sorts what it pages over.
+    pub fn tagged_resources(&self) -> Vec<TaggedResource<'_>> {
+        let store = self;
+        let mut rows: Vec<TaggedResource<'_>> = Vec::new();
+        for (resource_id, instance) in &store.instances {
+            rows.push(TaggedResource::from_map(
+                resource_id,
+                INSTANCE_RESOURCE_TYPE,
+                &instance.tags,
+            ));
+        }
+        for (resource_id, interface) in &store.network_interfaces {
+            rows.push(TaggedResource::from_list(
+                resource_id,
+                NETWORK_INTERFACE_RESOURCE_TYPE,
+                interface.tag_set.as_deref().unwrap_or_default(),
+            ));
+        }
+        taggable_resource_stores!(tagged_resource_rows!(store, rows,));
+        rows
     }
 }
 
