@@ -196,3 +196,46 @@ func TestOnlyAClusterThisProvisionerBuiltIsTornDownByIt(t *testing.T) {
 		t.Error("a kind cluster another provisioner built was taken as this one's")
 	}
 }
+
+func TestAnUnavailableWebhookSaysWhatItsPodsWaitFor(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-identity-webhook-7d9", Namespace: "kube-system", Labels: map[string]string{"app": "pod-identity-webhook"}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "pod-identity-webhook", State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: "toomanyrequests: Rate exceeded"},
+			}}},
+		},
+	})
+
+	state := podsState(context.Background(), clientset, "kube-system", "app=pod-identity-webhook")
+
+	for _, want := range []string{"pod-identity-webhook-7d9", "Pending", "ImagePullBackOff", "Rate exceeded"} {
+		if !strings.Contains(state, want) {
+			t.Errorf("%q does not say %q", state, want)
+		}
+	}
+}
+
+func TestAnUnscheduledWebhookPodSaysWhy(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-identity-webhook-7d9", Namespace: "kube-system", Labels: map[string]string{"app": "pod-identity-webhook"}},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: "0/1 nodes are available: 1 node(s) had untolerated taint",
+		}}},
+	})
+
+	state := podsState(context.Background(), clientset, "kube-system", "app=pod-identity-webhook")
+
+	if !strings.Contains(state, "Unschedulable") || !strings.Contains(state, "untolerated taint") {
+		t.Errorf("got %q", state)
+	}
+}
+
+func TestAWebhookWithNoPodSaysSo(t *testing.T) {
+	state := podsState(context.Background(), fake.NewSimpleClientset(), "kube-system", "app=pod-identity-webhook")
+
+	if !strings.Contains(state, "no pod") {
+		t.Errorf("got %q", state)
+	}
+}

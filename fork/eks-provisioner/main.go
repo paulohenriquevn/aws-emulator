@@ -134,7 +134,7 @@ func run(regions, stateDir, listen, stsAliases, systemRoots string, interval tim
 		case <-ctx.Done():
 			return nil
 		case err := <-served:
-			return fmt.Errorf("the token webhook stopped: %w", err)
+			return webhookStopped(ctx, err)
 		case <-ticker.C:
 		}
 	}
@@ -296,4 +296,17 @@ func envOr(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// webhookStopped is what the provisioner exits with once its webhook server returned: nothing
+// on shutdown, which returns the server without an error, and an error otherwise.
+func webhookStopped(ctx context.Context, err error) error {
+	switch {
+	case err != nil:
+		return fmt.Errorf("the token webhook stopped: %w", err)
+	case ctx.Err() != nil:
+		return nil
+	default:
+		return errors.New("the token webhook stopped without an error")
+	}
 }

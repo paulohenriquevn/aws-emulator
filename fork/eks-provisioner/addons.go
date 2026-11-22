@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -298,7 +299,8 @@ func (p *provisioner) waitForPodIdentityWebhook(ctx context.Context, region, nam
 			return err
 		}
 		if deployment.Status.ObservedGeneration < deployment.Generation || deployment.Status.AvailableReplicas < 1 {
-			return fmt.Errorf("%d of %d replicas available", deployment.Status.AvailableReplicas, *deployment.Spec.Replicas)
+			return fmt.Errorf("%d of %d replicas available; %s", deployment.Status.AvailableReplicas, *deployment.Spec.Replicas,
+				podsState(ctx, clientset, podIdentityNamespace, "app="+podIdentityWebhookName))
 		}
 		return nil
 	})
@@ -343,4 +345,36 @@ func (w *webhook) stillValid(certPEM []byte) bool {
 		return false
 	}
 	return cert.CheckSignatureFrom(w.ca) == nil && time.Now().AddDate(0, 0, 30).Before(cert.NotAfter)
+}
+
+// podsState says what the pods selector names are waiting for: their phase, why one is not
+// scheduled, and what each container waits on (an image pull, a crash). It is what a
+// deployment that never becomes available is reported with.
+func podsState(ctx context.Context, clientset kubernetes.Interface, namespace, selector string) string {
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return "its pods could not be listed: " + err.Error()
+	}
+	if len(pods.Items) == 0 {
+		return "no pod matches " + selector
+	}
+	var states []string
+	for _, pod := range pods.Items {
+		state := fmt.Sprintf("pod %s is %s", pod.Name, pod.Status.Phase)
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionFalse {
+				state += fmt.Sprintf(", not scheduled (%s: %s)", condition.Reason, condition.Message)
+			}
+		}
+		for _, container := range append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...) {
+			if waiting := container.State.Waiting; waiting != nil {
+				state += fmt.Sprintf(", container %s waiting (%s: %s)", container.Name, waiting.Reason, waiting.Message)
+			}
+			if terminated := container.LastTerminationState.Terminated; terminated != nil {
+				state += fmt.Sprintf(", container %s last exited %d (%s)", container.Name, terminated.ExitCode, terminated.Reason)
+			}
+		}
+		states = append(states, state)
+	}
+	return strings.Join(states, "; ")
 }

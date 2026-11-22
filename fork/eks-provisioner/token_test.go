@@ -166,3 +166,20 @@ func TestATokensRequestIsSentToTheEmulatorUnderTheHostItWasSignedFor(t *testing.
 		t.Fatalf("the emulator saw Host %q and cluster %q", seenHost, seenCluster)
 	}
 }
+
+func TestTheWebhookStoppingOnShutdownIsNoError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := webhookStopped(ctx, nil); err != nil {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTheWebhookStoppingOnItsOwnIsAnErrorThatSaysSo(t *testing.T) {
+	err := webhookStopped(context.Background(), nil)
+
+	if err == nil || strings.Contains(err.Error(), "%!") || !strings.Contains(err.Error(), "token webhook stopped") {
+		t.Fatalf("got %v", err)
+	}
+}
