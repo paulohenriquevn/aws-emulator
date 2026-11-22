@@ -48,6 +48,11 @@ type provisioner struct {
 	log        *slog.Logger
 	retryAfter map[string]time.Time
 	failures   map[string]int
+	// trust is the CA every pod of every cluster gets, and podEndpoint the emulator's
+	// address they get, which they reach through their VPC's gateway.
+	trust       trustBundle
+	podEndpoint string
+	addonsAt    map[string]time.Time
 }
 
 func main() {
@@ -56,16 +61,17 @@ func main() {
 	listen := flag.String("listen", ":9598", "address the token webhook listens on; the API servers dial the gateway of their VPC's bridge at this port")
 	interval := flag.Duration("interval", 5*time.Second, "time between two reconcile passes")
 	stsAliases := flag.String("sts-aliases", "", "comma-separated host:port names, besides AWS_ENDPOINT_URL's, that clients reach the same emulator by (localhost:9597 on the emulator's host); a token signed for one of them is accepted")
+	systemRoots := flag.String("system-roots", "", "PEM bundle of public roots that pods get with the emulator's CA (default: SSL_CERT_FILE, else the host's bundle)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	if err := run(*regions, *stateDir, *listen, *stsAliases, *interval, logger); err != nil {
+	if err := run(*regions, *stateDir, *listen, *stsAliases, *systemRoots, *interval, logger); err != nil {
 		logger.Error("eks-provisioner stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(regions, stateDir, listen, stsAliases string, interval time.Duration, logger *slog.Logger) error {
+func run(regions, stateDir, listen, stsAliases, systemRoots string, interval time.Duration, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -85,21 +91,33 @@ func run(regions, stateDir, listen, stsAliases string, interval time.Duration, l
 	if err != nil {
 		return err
 	}
+	if systemRoots == "" {
+		if systemRoots, err = findSystemRoots(); err != nil {
+			return err
+		}
+	}
+	trust, err := loadTrustBundle(os.Getenv("AWS_CA_BUNDLE"), systemRoots)
+	if err != nil {
+		return err
+	}
 	_, port, found := strings.Cut(listen, ":")
 	if !found || port == "" {
 		return fmt.Errorf("--listen %q names no port", listen)
 	}
 	p := &provisioner{
-		regions:    splitList(regions),
-		stateDir:   stateDir,
-		listenPort: port,
-		emulator:   emu,
-		webhook:    hook,
-		kind:       cluster.NewProvider(cluster.ProviderWithDocker(), cluster.ProviderWithLogger(log.NoopLogger{})),
-		awsConfig:  awsConfig,
-		log:        logger,
-		retryAfter: map[string]time.Time{},
-		failures:   map[string]int{},
+		regions:     splitList(regions),
+		stateDir:    stateDir,
+		listenPort:  port,
+		emulator:    emu,
+		webhook:     hook,
+		kind:        cluster.NewProvider(cluster.ProviderWithDocker(), cluster.ProviderWithLogger(log.NoopLogger{})),
+		awsConfig:   awsConfig,
+		log:         logger,
+		retryAfter:  map[string]time.Time{},
+		failures:    map[string]int{},
+		trust:       trust,
+		podEndpoint: strings.TrimRight(endpoint, "/"),
+		addonsAt:    map[string]time.Time{},
 	}
 	served := make(chan error, 1)
 	go func() { served <- p.listen(ctx, listen, logger) }()
@@ -157,7 +175,7 @@ func (p *provisioner) reconcileRegion(ctx context.Context, region string) error 
 	prefix := kindName(region, "")
 	for _, kind := range owned {
 		name, ours := strings.CutPrefix(kind, prefix)
-		if !ours || present[name] {
+		if !ours || present[name] || !p.provisioned(region, name) {
 			continue
 		}
 		p.attempt(ctx, region, name, func() error { return p.teardown(ctx, region, name) })
@@ -165,14 +183,25 @@ func (p *provisioner) reconcileRegion(ctx context.Context, region string) error 
 	return nil
 }
 
-// reconcileCluster provisions a cluster's control plane when it has none, and its nodes
-// once it is ACTIVE.
+// reconcileCluster provisions a cluster's control plane when it has none, and its
+// add-ons and nodes once it is ACTIVE.
 func (p *provisioner) reconcileCluster(ctx context.Context, region string, described *ekstypes.Cluster) error {
 	name := aws.ToString(described.Name)
 	if described.Status == ekstypes.ClusterStatusCreating || !p.kindExists(kindName(region, name)) || !p.registered(described) {
 		return p.provisionControlPlane(ctx, region, described)
 	}
+	if err := p.reconcileAddons(ctx, region, described); err != nil {
+		return err
+	}
 	return p.reconcileNodes(ctx, region, name)
+}
+
+// provisioned is whether this provisioner built the kind cluster of an EKS cluster: it
+// keeps the cluster's state directory. A kind cluster another provisioner built, beside
+// another emulator on the same host, is not this one's to tear down.
+func (p *provisioner) provisioned(region, name string) bool {
+	_, err := os.Stat(p.clusterDir(region, name))
+	return err == nil
 }
 
 // registered is whether the cluster's endpoint is the API server this provisioner ran.
@@ -188,6 +217,7 @@ func (p *provisioner) registered(described *ekstypes.Cluster) bool {
 
 func (p *provisioner) teardown(ctx context.Context, region, name string) error {
 	p.log.Info("deleting the control plane of a cluster that is gone", "cluster", name, "region", region)
+	delete(p.addonsAt, region+"/"+name)
 	if err := p.kind.Delete(kindName(region, name), filepath.Join(p.clusterDir(region, name), "kubeconfig")); err != nil {
 		return fmt.Errorf("kind delete cluster %s: %w", kindName(region, name), err)
 	}

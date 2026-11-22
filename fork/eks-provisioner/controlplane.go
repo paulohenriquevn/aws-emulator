@@ -306,6 +306,12 @@ func (p *provisioner) provisionControlPlane(ctx context.Context, region string, 
 	if err := bindAccessPolicies(ctx, clientset); err != nil {
 		return err
 	}
+	if err := p.installAddons(ctx, region, name, gatewayOf(cidr)); err != nil {
+		return err
+	}
+	if err := p.waitForPodIdentityWebhook(ctx, region, name); err != nil {
+		return err
+	}
 	jwks, err := clientset.CoreV1().RESTClient().Get().AbsPath("/openid/v1/jwks").DoRaw(ctx)
 	if err != nil {
 		return fmt.Errorf("reading the service account key set of %s: %w", name, err)

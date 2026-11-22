@@ -11,11 +11,17 @@
 #   3. `aws eks update-kubeconfig` writes a kubeconfig whose user runs `aws eks get-token`,
 #      and kubectl with it lists the node group's instances as Ready nodes, each with its
 #      instance's providerID and address;
-#   4. a principal with no access entry is refused, and deleting the cluster deletes its
+#   4. a pod whose service account is annotated with an IRSA role, and that sets no AWS
+#      variable of its own, is that role for `aws sts get-caller-identity`: the pod
+#      identity webhook gives it the role and the token, and the provisioner's webhook
+#      the emulator's endpoint and CA; a kube-system pod gets no endpoint;
+#   5. a principal with no access entry is refused, and deleting the cluster deletes its
 #      kind cluster.
 #
 # Usage: fork/eks-provisioner/e2e.sh <emulator-binary> <provisioner-binary>
-# Needs docker, kind, kubectl, aws (CLI v2), curl and jq.
+# Needs docker, kind, kubectl, aws (CLI v2), curl and jq. It touches only the kind cluster
+# and the Docker network it creates, so it runs beside another emulator and provisioner
+# on the same host: set E2E_PORT and E2E_WEBHOOK_PORT to ports they do not use.
 set -euo pipefail
 
 BIN=$(realpath "${1:?the emulator binary}")
@@ -33,6 +39,7 @@ EMULATOR_NETWORK=aws-emulator-e2e
 EMULATOR_CIDR=172.30.0.0/16
 GATEWAY=172.30.0.1
 VPC_CIDR=10.42.0.0/16
+AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.37.8
 
 say() { printf '[e2e] %s\n' "$*"; }
 fail() { printf '[e2e] FAIL: %s\n' "$*" >&2; exit 1; }
@@ -40,9 +47,13 @@ wait_for() { local tries=$1; shift; for _ in $(seq "$tries"); do "$@" >/dev/null
 
 cleanup() {
   [[ -n ${PROVISIONER_PID:-} ]] && kill "$PROVISIONER_PID" 2>/dev/null || true
-  for kind in $(kind get clusters 2>/dev/null | grep "^eks-$REGION-" || true); do kind delete cluster --name "$kind" >>"$LOG" 2>&1 || true; done
+  kind get clusters 2>/dev/null | grep -qx "eks-$REGION-$CLUSTER" && { kind delete cluster --name "eks-$REGION-$CLUSTER" >>"$LOG" 2>&1 || true; }
   [[ -n ${EMU_PID:-} ]] && kill "$EMU_PID" 2>/dev/null || true
-  for network in $(docker network ls --filter label=aws-emulator.vpc-id --format '{{.Name}}'); do docker network rm "$network" >>"$LOG" 2>&1 || true; done
+  if [[ -n ${VPC:-} ]]; then
+    for network in $(docker network ls --filter "label=aws-emulator.vpc-id=$VPC" --format '{{.Name}}'); do
+      docker network inspect "$network" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' | grep -qx "$VPC_CIDR" && { docker network rm "$network" >>"$LOG" 2>&1 || true; }
+    done
+  fi
   docker network rm "$EMULATOR_NETWORK" >>"$LOG" 2>&1 || true
 }
 trap cleanup EXIT
@@ -102,7 +113,41 @@ actual=$(kubectl get nodes -l "eks.amazonaws.com/nodegroup=$NODEGROUP" -o json |
 [[ $expected == "$actual" ]] || fail "nodes do not match the instances: expected [$expected], got [$actual]"
 say "nodes are the node group's instances: $(echo "$actual" | tr '\n' ' ')"
 
-# --- 4. Access entries decide, and deletion tears down -------------------------------------
+# --- 4. IRSA, and the emulator's endpoint and CA, with nothing set in the pod -------------
+ISSUER=$(aws eks describe-cluster --name "$CLUSTER" --query cluster.identity.oidc.issuer --output text)
+PROVIDER=${ISSUER#https://}
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+aws iam create-open-id-connect-provider --url "$ISSUER" --client-id-list sts.amazonaws.com \
+  --thumbprint-list 9e99a48a9960b14926bb7f3b02e22da2b0ab7280 >>"$LOG"
+IRSA_ROLE=$(aws iam create-role --role-name "$CLUSTER-irsa" --query Role.Arn --output text --assume-role-policy-document "$(
+  jq -cn --arg provider "$PROVIDER" --arg federated "arn:aws:iam::$ACCOUNT:oidc-provider/$PROVIDER" \
+    '{Version:"2012-10-17",Statement:[{Effect:"Allow",Principal:{Federated:$federated},Action:"sts:AssumeRoleWithWebIdentity",
+      Condition:{StringEquals:{($provider+":sub"):"system:serviceaccount:irsa:irsa-probe",($provider+":aud"):"sts.amazonaws.com"}}}]}')")
+kubectl create namespace irsa >>"$LOG"
+kubectl -n irsa create serviceaccount irsa-probe >>"$LOG"
+kubectl -n irsa annotate serviceaccount irsa-probe "eks.amazonaws.com/role-arn=$IRSA_ROLE" >>"$LOG"
+kubectl apply -f - >>"$LOG" <<POD
+apiVersion: v1
+kind: Pod
+metadata: {name: irsa-probe, namespace: irsa}
+spec:
+  serviceAccountName: irsa-probe
+  restartPolicy: Never
+  containers:
+  - name: aws
+    image: $AWS_CLI_IMAGE
+    args: [sts, get-caller-identity, --query, Arn, --output, text]
+POD
+kubectl -n irsa wait pod irsa-probe --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s >>"$LOG" 2>&1 ||
+  { kubectl -n irsa describe pod irsa-probe; kubectl -n irsa logs irsa-probe; fail "the IRSA probe did not succeed"; }
+answer=$(kubectl -n irsa logs irsa-probe)
+[[ $answer == "arn:aws:sts::$ACCOUNT:assumed-role/$CLUSTER-irsa/"* ]] || fail "the IRSA probe is $answer, not role $IRSA_ROLE"
+say "irsa: a pod with no AWS variable of its own is $answer"
+system_env=$(kubectl -n kube-system get pods -l app=pod-identity-webhook -o jsonpath='{.items[*].spec.containers[*].env[*].name}')
+[[ $system_env != *AWS_ENDPOINT_URL* ]] || fail "a kube-system pod got the emulator's endpoint"
+say "kube-system pods keep their own environment"
+
+# --- 5. Access entries decide, and deletion tears down -------------------------------------
 OUTSIDER=$(aws iam create-role --role-name outsider --assume-role-policy-document \
   "$(jq -cn '{Version:"2012-10-17",Statement:[{Effect:"Allow",Principal:{AWS:"arn:aws:iam::000000000000:root"},Action:"sts:AssumeRole"}]}')" --query Role.Arn --output text)
 read -r key secret session < <(aws sts assume-role --role-arn "$OUTSIDER" --role-session-name e2e \

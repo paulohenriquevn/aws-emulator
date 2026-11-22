@@ -44,3 +44,11 @@ func TestTheGatewayIsTheFirstHostAddressOfTheVpc(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestTheVpcNetworkIsNamedAfterItsCIDRAsWellAsItsID(t *testing.T) {
+	// Two emulators on one host count VPC ids alike, so the id alone names one network for
+	// two VPCs; the CIDR, which Docker keeps unique on the host, tells them apart.
+	if got := vpcNetworkName("vpc-000000000000000c6", netip.MustParsePrefix("10.42.0.0/16")); got != "aws-emulator-vpc-000000000000000c6-10.42.0.0-16" {
+		t.Fatalf("got %q", got)
+	}
+}

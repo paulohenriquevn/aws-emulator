@@ -48,7 +48,7 @@ func vpcNetwork(ctx context.Context, vpcID string, cidr netip.Prefix, subnets []
 	if err != nil {
 		return "", fmt.Errorf("VPC %s: %w", vpcID, err)
 	}
-	name := "aws-emulator-" + vpcID
+	name := vpcNetworkName(vpcID, cidr)
 	_, err = docker(ctx, "network", "create", name, "--driver", "bridge",
 		"--subnet", cidr.Masked().String(), "--ip-range", ipRange.String(), "--gateway", gatewayOf(cidr).String(),
 		"--label", "aws-emulator.vpc-id="+vpcID,
@@ -57,6 +57,12 @@ func vpcNetwork(ctx context.Context, vpcID string, cidr netip.Prefix, subnets []
 		return "", err
 	}
 	return name, nil
+}
+
+// vpcNetworkName is the Docker network created for a VPC. The CIDR is in the name because
+// two emulators on one host hand out the same VPC ids, and Docker keeps the CIDR unique.
+func vpcNetworkName(vpcID string, cidr netip.Prefix) string {
+	return "aws-emulator-" + vpcID + "-" + strings.ReplaceAll(cidr.Masked().String(), "/", "-")
 }
 
 // waitFor runs probe until it succeeds or timeout passes.

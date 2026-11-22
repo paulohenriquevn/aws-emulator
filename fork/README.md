@@ -214,7 +214,8 @@ Every few seconds it reconciles each Region:
 
 The VPC's Docker network has the VPC's CIDR and hands out container addresses only from the
 highest /27 no subnet covers, so it never hands out an address EC2 assigns. A network that
-already has the VPC's CIDR is used as it is.
+already has the VPC's CIDR is used as it is; a new one is named
+`aws-emulator-<vpc-id>-<cidr>`, since two emulators on one host hand out the same VPC ids.
 
 The API servers authenticate a bearer token through the provisioner (`--listen`, which they
 dial at the gateway of their VPC's network): the token's presigned `GetCallerIdentity` is sent
@@ -231,10 +232,43 @@ A token is accepted only when its request goes to the emulator: the host of
 at `localhost`, and S3 Control needs that name). Whatever the name, the provisioner sends the
 request to `AWS_ENDPOINT_URL` with that name as its `Host`, which the signature covers.
 
+Before it registers a cluster, and again every minute while the cluster runs, the provisioner
+installs what Amazon EKS runs on its control plane, so a chart written for Amazon EKS needs no
+change here:
+
+| Add-on | What a pod gets |
+|---|---|
+| `amazon-eks-pod-identity-webhook` v0.6.19, pinned by digest, in `kube-system` on the control-plane node | IRSA, as on Amazon EKS: a pod whose service account carries `eks.amazonaws.com/role-arn` gets `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, a projected token for the audience `sts.amazonaws.com`, `AWS_REGION`, `AWS_DEFAULT_REGION` and `AWS_STS_REGIONAL_ENDPOINTS=regional`. |
+| The MutatingWebhookConfiguration `aws-emulator-endpoint`, served by the provisioner at `/mutate/{region}/{cluster}` | Every container and init container gets `AWS_ENDPOINT_URL` and `AWS_ENDPOINT_URL_STS` (the provisioner's own `AWS_ENDPOINT_URL`), `AWS_CA_BUNDLE` and `SSL_CERT_FILE` (the public roots plus the emulator's CA), and `NODE_EXTRA_CA_CERTS` (the emulator's CA), from a ConfigMap mounted read-only at `/etc/aws-emulator`. |
+
+The pod identity webhook runs on the control-plane node, where Amazon EKS runs it, so it serves
+pods created before any node has joined, and the cluster turns `ACTIVE` only once it is
+available. Its serving certificate is signed by the provisioner's `webhook-ca.crt`, which the
+API server trusts already, and kept in the cluster's state directory.
+
+The endpoint webhook leaves alone a pod in `kube-system` and a pod with a container that sets
+`AWS_ENDPOINT_URL`, and a variable a container sets itself keeps its value. Its
+`failurePolicy` is `Fail`: while the provisioner is down a pod outside `kube-system` is
+refused, and its controller creates it again, rather than started with no endpoint and sent
+to `*.amazonaws.com`. `kube-system` is excluded so the cluster's own components keep
+starting meanwhile. The ConfigMap is created in the pod's namespace while the pod is admitted
+(not on a dry run), and named after its content (`aws-emulator-ca-<hash>`, immutable), so a
+namespace created a moment earlier already has it, and a changed CA is a new ConfigMap that
+new pods mount. The public roots are the host's bundle (`--system-roots`, by default
+`SSL_CERT_FILE` or the distribution's file); a pod that trusts roots of its own besides those
+sets `SSL_CERT_FILE` itself.
+
+Pods reach the emulator at `AWS_ENDPOINT_URL` through their node and the VPC's gateway, so it
+must be an address the VPC networks route to (on the staging host, `172.29.0.1`, with the
+firewall admitting `10.0.0.0/8`).
+
 `fork/eks-provisioner/e2e.sh <emulator> <provisioner>` creates a cluster and a node group with
 the AWS CLI, waits for them to turn `ACTIVE`, lists the instances as Ready nodes with a
-kubeconfig from `aws eks update-kubeconfig`, checks a role with no access entry is refused,
-and deletes everything.
+kubeconfig from `aws eks update-kubeconfig`, runs `aws sts get-caller-identity` in a pod whose
+service account names an IRSA role and that sets no AWS variable, checks a role with no access
+entry is refused, and deletes everything. A provisioner tears down only the kind clusters it
+keeps a state directory for, so the script runs beside another emulator and provisioner on the
+same host with `E2E_PORT` and `E2E_WEBHOOK_PORT` set to free ports.
 
 Limits:
 
@@ -243,6 +277,10 @@ Limits:
 - A cluster name must be a valid kind cluster name: lowercase letters, digits, `-` and `.`.
 - Nodes join with a kubeadm bootstrap token, not as the node role's access entry, and the
   control plane is a Node of the cluster too, tainted `NoSchedule`.
+- The pod identity webhook gets no EKS Pod Identity associations, and no EKS Pod Identity
+  Agent runs: a pod gets IRSA, not Pod Identity.
+- A variable a pod takes from `envFrom` is not seen: a pod that sets `AWS_ENDPOINT_URL` only
+  through a ConfigMap or a Secret gets the injected one, which takes precedence.
 - Pods take addresses from `100.64.0.0/16`, not from the VPC: kind's CNI is not the Amazon
   VPC CNI. A pod's traffic leaves its node from the instance's address.
 - Clusters are created one after another; each takes about a minute.
@@ -352,6 +390,7 @@ upstream ships the fix.
 |---|---|---|
 | EC2 | Tags on network ACLs | aws/aws-emulator#76 |
 | EC2 | Revoking an all-protocols rule that names a port range | aws/aws-emulator#46 |
+| EC2 | `DescribeTags` is implemented over the resources `CreateTags` tags (`src/ops/describe_tags.rs`, `src/state/tag_descriptions.rs`) | not reported yet |
 | ACM | One DNS validation CNAME for a wildcard and its apex | aws/aws-emulator#536 |
 | SSM | EKS optimized AL2023 AMI parameters | aws/aws-emulator#535 |
 | TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |

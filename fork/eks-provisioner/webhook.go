@@ -111,26 +111,50 @@ func (w *webhook) certificateFor(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 	if cert, ok := w.certs[host]; ok {
 		return cert, nil
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject:      pkix.Name{CommonName: host},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().AddDate(1, 0, 0),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.ParseIP(host)},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, w.ca, &key.PublicKey, w.caKey)
+	der, key, err := w.sign(host, nil, []net.IP{net.ParseIP(host)})
 	if err != nil {
 		return nil, err
 	}
 	cert := &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 	w.certs[host] = cert
 	return cert, nil
+}
+
+// issue is a serving certificate for dnsNames and ips signed by the webhook CA, in PEM,
+// for a server the API servers call other than this one.
+func (w *webhook) issue(commonName string, dnsNames []string, ips []net.IP) (certPEM, keyPEM []byte, err error) {
+	der, key, err := w.sign(commonName, dnsNames, ips)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+// sign issues a one-year serving certificate signed by the webhook CA.
+func (w *webhook) sign(commonName string, dnsNames []string, ips []net.IP) ([]byte, *ecdsa.PrivateKey, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: commonName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().AddDate(1, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     dnsNames,
+		IPAddresses:  ips,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, w.ca, &key.PublicKey, w.caKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	return der, key, nil
 }
 
 // serveTokenReviews answers POST /authenticate/{region}/{cluster}.
@@ -241,10 +265,12 @@ func (p *provisioner) bindNamespaced(ctx context.Context, region, cluster, polic
 	return bindNamespacedPolicy(ctx, clientset, policy, namespace)
 }
 
-// listen serves the token webhook and /healthz until ctx ends.
+// listen serves the token webhook, the endpoint injection webhook and /healthz until
+// ctx ends.
 func (p *provisioner) listen(ctx context.Context, address string, log *slog.Logger) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/authenticate/", p.serveTokenReviews)
+	mux.HandleFunc("/mutate/", p.servePodMutations)
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.Write([]byte("ok\n")) })
 	server := &http.Server{
 		Addr:              address,
