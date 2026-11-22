@@ -84,6 +84,8 @@ func kindConfig(spec clusterSpec) *v1alpha4.Cluster {
 apiServer:
   certSANs:
   - %q
+  - "localhost"
+  - "127.0.0.1"
   extraArgs:
     service-account-issuer: %q
     authentication-token-webhook-config-file: %q

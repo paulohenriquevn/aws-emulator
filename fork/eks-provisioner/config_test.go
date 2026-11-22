@@ -45,6 +45,10 @@ func TestTheAPIServerIssuesTokensAsTheClustersIssuerAndServesItsInterfaceAddress
 	for _, fragment := range []string{
 		`service-account-issuer: "https://oidc.eks.us-east-1.amazonaws.com/id/ABC"`,
 		`- "10.0.1.20"`,
+		// kind's own names for the API server: the admin kubeconfig kind writes dials
+		// 127.0.0.1, and a merge patch replaces kind's certSANs list rather than extending it.
+		`- "localhost"`,
+		`- "127.0.0.1"`,
 		`authentication-token-webhook-config-file: "/etc/kubernetes/eks-auth/webhook.kubeconfig"`,
 	} {
 		if !strings.Contains(patch, fragment) {
