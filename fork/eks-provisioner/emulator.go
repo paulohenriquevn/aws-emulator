@@ -26,12 +26,15 @@ import (
 // emulator's keys, and its STS for the identity a token carries.
 type emulator struct {
 	endpoint *url.URL
+	// stsHosts are the names a token's request may go to: the endpoint's host, and the
+	// other names clients reach the same emulator by.
+	stsHosts []string
 	creds    aws.CredentialsProvider
 	client   *http.Client
 	signer   *v4.Signer
 }
 
-func newEmulator(endpoint string, caBundle string, creds aws.CredentialsProvider) (*emulator, error) {
+func newEmulator(endpoint string, aliases []string, caBundle string, creds aws.CredentialsProvider) (*emulator, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return nil, fmt.Errorf("AWS_ENDPOINT_URL %q is not an https URL", endpoint)
@@ -51,6 +54,7 @@ func newEmulator(endpoint string, caBundle string, creds aws.CredentialsProvider
 	}
 	return &emulator{
 		endpoint: parsed,
+		stsHosts: append([]string{parsed.Host}, aliases...),
 		creds:    creds,
 		client:   &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}},
 		signer:   v4.NewSigner(),
@@ -141,10 +145,16 @@ type callerIdentity struct {
 // is good, which is the whole of the token's authentication.
 func (e *emulator) callerOf(ctx context.Context, identity presignedIdentity, cluster string) (callerIdentity, error) {
 	var caller callerIdentity
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, identity.URL.String(), nil)
+	// The request goes to the endpoint whatever name the token was signed for, and keeps
+	// that name as its Host, which the signature covers: the token chooses a name, never
+	// where the provisioner connects.
+	target := *identity.URL
+	target.Scheme, target.Host = e.endpoint.Scheme, e.endpoint.Host
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return caller, err
 	}
+	request.Host = identity.URL.Host
 	request.Header.Set(clusterIDHeader, cluster)
 	response, err := e.client.Do(request)
 	if err != nil {

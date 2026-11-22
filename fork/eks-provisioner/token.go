@@ -29,8 +29,9 @@ type presignedIdentity struct {
 
 // parseToken decodes a bearer token into its presigned request and checks what can be
 // checked without calling STS: the form, the action, that the cluster header is signed,
-// the signing date, and that the request goes to the emulator (stsHost) and nowhere else.
-func parseToken(token, stsHost string, now time.Time) (presignedIdentity, error) {
+// the signing date, and that the request goes to the emulator, under one of its names
+// (stsHosts), and nowhere else.
+func parseToken(token string, stsHosts []string, now time.Time) (presignedIdentity, error) {
 	encoded, ok := strings.CutPrefix(token, tokenPrefix)
 	if !ok {
 		return presignedIdentity{}, fmt.Errorf("the token does not start with %q", tokenPrefix)
@@ -43,8 +44,8 @@ func parseToken(token, stsHost string, now time.Time) (presignedIdentity, error)
 	if err != nil {
 		return presignedIdentity{}, fmt.Errorf("the token does not hold a URL: %w", err)
 	}
-	if presigned.Scheme != "https" || presigned.Host != stsHost {
-		return presignedIdentity{}, fmt.Errorf("the token's request goes to %s://%s, not to STS at https://%s", presigned.Scheme, presigned.Host, stsHost)
+	if presigned.Scheme != "https" || !contains(stsHosts, presigned.Host) {
+		return presignedIdentity{}, fmt.Errorf("the token's request goes to %s://%s, not to the emulator's STS at %s", presigned.Scheme, presigned.Host, strings.Join(stsHosts, ", "))
 	}
 	query := presigned.Query()
 	if query.Get("Action") != "GetCallerIdentity" {

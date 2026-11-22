@@ -164,7 +164,7 @@ func (p *provisioner) serveTokenReviews(writer http.ResponseWriter, request *htt
 // authenticate is the user a token stands for in a cluster: the principal STS reports for
 // its presigned request, as the cluster's access entry for that principal names it.
 func (p *provisioner) authenticate(ctx context.Context, region, cluster, token string) (authenticationv1.UserInfo, error) {
-	presigned, err := parseToken(token, p.emulator.endpoint.Host, time.Now())
+	presigned, err := parseToken(token, p.emulator.stsHosts, time.Now())
 	if err != nil {
 		return authenticationv1.UserInfo{}, err
 	}

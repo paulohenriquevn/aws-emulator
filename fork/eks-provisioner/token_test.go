@@ -3,7 +3,11 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +28,7 @@ func presignedURL(host, signedHeaders string) string {
 }
 
 func TestATokenForTheEmulatorsSTSIsDecodedIntoItsRequest(t *testing.T) {
-	parsed, err := parseToken(token(presignedURL(testSTSHost, "host%3Bx-k8s-aws-id")), testSTSHost, signedAt.Add(30*time.Second))
+	parsed, err := parseToken(token(presignedURL(testSTSHost, "host%3Bx-k8s-aws-id")), []string{testSTSHost}, signedAt.Add(30*time.Second))
 
 	if err != nil || parsed.URL.Host != testSTSHost {
 		t.Fatalf("got %+v, %v", parsed, err)
@@ -32,7 +36,7 @@ func TestATokenForTheEmulatorsSTSIsDecodedIntoItsRequest(t *testing.T) {
 }
 
 func TestATokenWhoseRequestGoesElsewhereIsRefused(t *testing.T) {
-	_, err := parseToken(token(presignedURL("evil.example", "host%3Bx-k8s-aws-id")), testSTSHost, signedAt)
+	_, err := parseToken(token(presignedURL("evil.example", "host%3Bx-k8s-aws-id")), []string{testSTSHost}, signedAt)
 
 	if err == nil || !strings.Contains(err.Error(), "evil.example") {
 		t.Fatalf("got %v", err)
@@ -40,7 +44,7 @@ func TestATokenWhoseRequestGoesElsewhereIsRefused(t *testing.T) {
 }
 
 func TestATokenThatSignsNoClusterIsRefused(t *testing.T) {
-	_, err := parseToken(token(presignedURL(testSTSHost, "host")), testSTSHost, signedAt)
+	_, err := parseToken(token(presignedURL(testSTSHost, "host")), []string{testSTSHost}, signedAt)
 
 	if err == nil || !strings.Contains(err.Error(), clusterIDHeader) {
 		t.Fatalf("got %v", err)
@@ -48,7 +52,7 @@ func TestATokenThatSignsNoClusterIsRefused(t *testing.T) {
 }
 
 func TestAnExpiredTokenIsRefused(t *testing.T) {
-	_, err := parseToken(token(presignedURL(testSTSHost, "host%3Bx-k8s-aws-id")), testSTSHost, signedAt.Add(2*time.Minute))
+	_, err := parseToken(token(presignedURL(testSTSHost, "host%3Bx-k8s-aws-id")), []string{testSTSHost}, signedAt.Add(2*time.Minute))
 
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("got %v", err)
@@ -56,7 +60,7 @@ func TestAnExpiredTokenIsRefused(t *testing.T) {
 }
 
 func TestATokenWithoutThePrefixIsRefused(t *testing.T) {
-	if _, err := parseToken("eyJhbGciOi", testSTSHost, signedAt); err == nil {
+	if _, err := parseToken("eyJhbGciOi", []string{testSTSHost}, signedAt); err == nil {
 		t.Fatal("a token without the prefix was accepted")
 	}
 }
@@ -118,5 +122,37 @@ func TestAnEKSVersionWithoutANodeImageIsRefusedWithTheSupportedOnes(t *testing.T
 
 	if err == nil || !strings.Contains(err.Error(), "1.35") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestATokenForAnotherNameOfTheEmulatorIsAccepted(t *testing.T) {
+	// The host reaches the emulator at localhost, and its VPCs at the gateway: both are it.
+	hosts := []string{testSTSHost, "localhost:9597"}
+
+	parsed, err := parseToken(token(presignedURL("localhost:9597", "host%3Bx-k8s-aws-id")), hosts, signedAt)
+
+	if err != nil || parsed.URL.Host != "localhost:9597" {
+		t.Fatalf("got %+v, %v", parsed, err)
+	}
+}
+
+func TestATokensRequestIsSentToTheEmulatorUnderTheHostItWasSignedFor(t *testing.T) {
+	var seenHost, seenCluster string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		seenHost, seenCluster = request.Host, request.Header.Get(clusterIDHeader)
+		writer.Write([]byte(`<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:iam::000000000000:user/emulator</Arn><UserId>AIDA</UserId><Account>000000000000</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`))
+	}))
+	defer server.Close()
+	endpoint, _ := url.Parse(server.URL)
+	emu := &emulator{endpoint: endpoint, client: server.Client()}
+	presigned, _ := url.Parse(presignedURL("localhost:9597", "host%3Bx-k8s-aws-id"))
+
+	caller, err := emu.callerOf(context.Background(), presignedIdentity{URL: presigned}, "core")
+
+	if err != nil || caller.Arn != "arn:aws:iam::000000000000:user/emulator" {
+		t.Fatalf("got %+v, %v", caller, err)
+	}
+	if seenHost != "localhost:9597" || seenCluster != "core" {
+		t.Fatalf("the emulator saw Host %q and cluster %q", seenHost, seenCluster)
 	}
 }

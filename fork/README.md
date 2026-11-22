@@ -226,6 +226,11 @@ groups are the entry's, and each associated access policy binds its ClusterRole:
 namespaces of its scope. The principal that created the cluster has the cluster-admin entry
 `CreateCluster` gives it.
 
+A token is accepted only when its request goes to the emulator: the host of
+`AWS_ENDPOINT_URL`, or a name in `--sts-aliases` (on the emulator's own host, clients reach it
+at `localhost`, and S3 Control needs that name). Whatever the name, the provisioner sends the
+request to `AWS_ENDPOINT_URL` with that name as its `Host`, which the signature covers.
+
 `fork/eks-provisioner/e2e.sh <emulator> <provisioner>` creates a cluster and a node group with
 the AWS CLI, waits for them to turn `ACTIVE`, lists the instances as Ready nodes with a
 kubeconfig from `aws eks update-kubeconfig`, checks a role with no access entry is refused,

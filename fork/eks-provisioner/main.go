@@ -55,16 +55,17 @@ func main() {
 	stateDir := flag.String("state-dir", "/var/lib/aws-emulator-eks", "where each cluster's CA, kubeconfig and webhook configuration are kept")
 	listen := flag.String("listen", ":9598", "address the token webhook listens on; the API servers dial the gateway of their VPC's bridge at this port")
 	interval := flag.Duration("interval", 5*time.Second, "time between two reconcile passes")
+	stsAliases := flag.String("sts-aliases", "", "comma-separated host:port names, besides AWS_ENDPOINT_URL's, that clients reach the same emulator by (localhost:9597 on the emulator's host); a token signed for one of them is accepted")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	if err := run(*regions, *stateDir, *listen, *interval, logger); err != nil {
+	if err := run(*regions, *stateDir, *listen, *stsAliases, *interval, logger); err != nil {
 		logger.Error("eks-provisioner stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(regions, stateDir, listen string, interval time.Duration, logger *slog.Logger) error {
+func run(regions, stateDir, listen, stsAliases string, interval time.Duration, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -76,7 +77,7 @@ func run(regions, stateDir, listen string, interval time.Duration, logger *slog.
 	if err != nil {
 		return fmt.Errorf("loading the AWS configuration: %w", err)
 	}
-	emu, err := newEmulator(endpoint, os.Getenv("AWS_CA_BUNDLE"), awsConfig.Credentials)
+	emu, err := newEmulator(endpoint, splitList(stsAliases), os.Getenv("AWS_CA_BUNDLE"), awsConfig.Credentials)
 	if err != nil {
 		return err
 	}
