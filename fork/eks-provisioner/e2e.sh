@@ -42,7 +42,17 @@ VPC_CIDR=10.42.0.0/16
 AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.37.8
 
 say() { printf '[e2e] %s\n' "$*"; }
-fail() { printf '[e2e] FAIL: %s\n' "$*" >&2; exit 1; }
+# A failure prints the end of the provisioner's and the emulator's logs: on a CI runner
+# the work directory is gone once the job ends.
+fail() {
+  printf '[e2e] FAIL: %s\n' "$*" >&2
+  for file in "$WORK/provisioner.log" "$WORK/emulator.log"; do
+    [[ -s $file ]] || continue
+    printf '[e2e] --- last lines of %s ---\n' "$file" >&2
+    tail -n 80 "$file" >&2
+  done
+  exit 1
+}
 wait_for() { local tries=$1; shift; for _ in $(seq "$tries"); do "$@" >/dev/null 2>&1 && return 0; sleep 2; done; return 1; }
 
 cleanup() {
