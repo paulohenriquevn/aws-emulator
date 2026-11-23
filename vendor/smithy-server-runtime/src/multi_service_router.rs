@@ -282,7 +282,13 @@ impl MultiServiceRouter {
                 .unwrap_or_else(|| svc.definition().routing_error_response(&rt_req));
             return http_response_from_runtime_api(rt_resp);
         };
-        let admitted = refuse_cross_site_browsers(&parts);
+        // fork: an operation that serves the browsers of any site (a load balancer's traffic)
+        // is not refused over its browser-set headers; CORS is the application's to answer.
+        let admitted = if op.serves_browsers_from_any_site() {
+            Ok(())
+        } else {
+            refuse_cross_site_browsers(&parts)
+        };
         let admitted =
             admitted.and_then(|()| self.authenticate(svc, wire, op, &rt_req, &parts, &_body));
         // fork: authorization of the authenticated caller, for a request a client made (a

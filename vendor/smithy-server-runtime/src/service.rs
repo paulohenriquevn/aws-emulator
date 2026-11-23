@@ -153,6 +153,14 @@ pub trait ErasedOperation: Send + Sync {
     fn auth_schemes(&self) -> Option<&'static [&'static str]> {
         None
     }
+
+    /// fork: true for an operation that serves the browsers of any site, as the data plane of
+    /// a resource a browser reaches on AWS does (a load balancer's traffic): the router then
+    /// skips its refusal of a request a browser sends from another site. False by default, so
+    /// the emulator's own API stays out of a web page's reach.
+    fn serves_browsers_from_any_site(&self) -> bool {
+        false
+    }
 }
 
 /// The model-derived routing table of one emulated service: every modeled
