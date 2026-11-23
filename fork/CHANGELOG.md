@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-23
+
 ### Fixed
 - An Application Load Balancer answers a request a browser sends from another site, and its CORS preflight, from its listener rules, as on AWS. The front door refused them with 403 `AccessDenied`, so a single-page app could not call an API behind a load balancer on another host (#17)
 
@@ -86,7 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - An RDS instance or cluster created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves that port, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
 - The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)
 
-[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/paulohenriquevn/aws-emulator/releases/tag/v0.1.0
