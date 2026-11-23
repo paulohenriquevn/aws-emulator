@@ -4266,6 +4266,11 @@ pub use registry_address::*;
 /// registry pull leaves behind, in `state/registry_v2.rs`.
 mod registry_v2;
 pub use registry_v2::*;
+/// The store writes a push makes — an upload session, a completed blob, a stored
+/// manifest — shared by the control-plane operations and the registry endpoint, in
+/// `state/image_push.rs`.
+mod image_push;
+pub use image_push::*;
 pub use layer_download::*;
 pub use image_scan::*;
 pub use scanning::*;

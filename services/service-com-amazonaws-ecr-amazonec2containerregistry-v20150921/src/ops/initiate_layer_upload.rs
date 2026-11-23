@@ -155,32 +155,6 @@ fn refusal(
     error
 }
 
-/// A fresh `UploadId`: 32 hex digits in the `8-4-4-4-12` layout the model's `UploadId`
-/// pattern requires
-/// (`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`).
-///
-/// The digits are the service's one mint, [`crate::state::mint_hex`] — nothing in them is
-/// derived from the request — laid out in the five groups the pattern requires. A hex id
-/// of 16 bytes is 32 digits, which is exactly what the layout consumes, so the slices
-/// below cannot be short.
-fn new_upload_id() -> String {
-    /// The bytes a minted `UploadId` carries: 16, whose hex rendering is the 32 digits
-    /// the model's layout spells out.
-    const UPLOAD_ID_BYTES: usize = 16;
-
-    let hex = crate::state::mint_hex(UPLOAD_ID_BYTES);
-    let group = |from: usize, to: usize| hex.get(from..to).unwrap_or_default();
-
-    format!(
-        "{}-{}-{}-{}-{}",
-        group(0, 8),
-        group(8, 12),
-        group(12, 16),
-        group(16, 20),
-        group(20, 32)
-    )
-}
-
 /// The `InitiateLayerUpload` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -255,20 +229,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .repository(&input.repository_name)
             .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
 
-        // An upload a client opened and abandoned otherwise holds its slot — and the bytes
-        // it received — for the life of the process, so the registry reclaims those it no
-        // longer owes anybody before it decides it is full. Nothing is reclaimed while
-        // there is room, and no upload younger than
-        // [`crate::state::ABANDONED_UPLOAD_AGE`] is ever dropped.
-        if store.uploads.len() >= crate::state::MAX_LAYER_UPLOADS {
-            store.reclaim_abandoned_uploads(::std::time::SystemTime::now());
-        }
-
-        // The store is bounded: past its cap an upload is not opened. The refusal is
-        // this operation's `ServerException` — reaching the cap is this registry's own
-        // capacity, not a fault in the caller's request. See
-        // [`crate::state::MAX_LAYER_UPLOADS`].
-        if store.uploads.len() >= crate::state::MAX_LAYER_UPLOADS {
+        // The upload is opened through the store's one opening of an upload session
+        // (`open_layer_upload`), the same one the registry endpoint's
+        // `POST /v2/<name>/blobs/uploads/` makes. An upload a client abandoned is reclaimed
+        // only when the registry is full, and no upload younger than
+        // [`crate::state::ABANDONED_UPLOAD_AGE`] is ever dropped. Past the cap nothing is
+        // opened: the refusal is this operation's `ServerException`, because reaching the
+        // cap is this registry's own capacity, not a fault in the caller's request. See
+        // [`crate::state::MAX_LAYER_UPLOADS`]. The id, in the layout the model gives
+        // `UploadId` ([`crate::state::new_upload_id`]), is minted only once every check has
+        // passed, so a refused call consumes none.
+        let Ok(upload_id) =
+            store.open_layer_upload(&input.repository_name, ::std::time::SystemTime::now())
+        else {
             return Err(refusal(
                 "upload cap reached",
                 &caller_akid,
@@ -280,24 +253,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }),
             )
             .into());
-        }
-
-        // The upload id the client addresses this upload by, in the layout the model
-        // gives `UploadId` — see [`new_upload_id`]. Minted only once every check has
-        // passed: a refused call consumes no id.
-        let upload_id = new_upload_id();
+        };
         let part_size = crate::state::REPORTED_LAYER_PART_SIZE;
-        store.uploads.insert(
-            upload_id.clone(),
-            crate::state::LayerUpload {
-                repository_name: input.repository_name,
-                part_size,
-                started_at: ::std::time::SystemTime::now(),
-                // A freshly opened upload has received nothing: `UploadLayerPart` is
-                // what streams the layer's bytes into it.
-                received_bytes: Vec::new(),
-            },
-        );
 
         // Audit record for a state-changing operation: who asked, what changed, how it
         // ended. Only wire metadata and server-minted identifiers.

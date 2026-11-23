@@ -2,6 +2,7 @@
 members = [
     "fork/console",
     "fork/service-account-issuers",
+    "fork/eks-control-plane",
     "fork/access-log",
     "fork/iam-gate",
     "fork/router",
@@ -932,6 +933,7 @@ emulator-paths = { path = "vendor/emulator-paths", package = "aws-emulator-emula
 # The fork layer (fork/, see fork/README.md).
 aws-emulator-fork-console = { path = "fork/console" }
 aws-emulator-fork-service-account-issuers = { path = "fork/service-account-issuers" }
+aws-emulator-fork-eks-control-plane = { path = "fork/eks-control-plane" }
 aws-emulator-fork-access-log = { path = "fork/access-log" }
 aws-emulator-fork-iam-gate = { path = "fork/iam-gate" }
 

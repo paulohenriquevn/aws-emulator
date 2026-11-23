@@ -44,10 +44,11 @@ pub const MOUNTED_SERVICES: [&str; 28] = [
 
 /// The mounted services behind the fork's own routes, which are answered before
 /// service dispatch: the console, and the registration of an external cluster's
-/// service account key set (which checks its own SigV4 signature). Every other
-/// request falls through to the services.
+/// service account key set and of an external control plane (each checks its own
+/// SigV4 signature). Every other request falls through to the services.
 pub fn build_router(engine: Arc<InMemoryEngine>) -> WithExtraRoutes<MultiServiceRouter> {
     let issuers = Arc::clone(&engine);
+    let control_planes = Arc::clone(&engine);
     WithExtraRoutes::new(build_services(engine))
         .route_matching(aws_emulator_fork_console::claims, |request| async move {
             aws_emulator_fork_console::respond(&request)
@@ -55,6 +56,10 @@ pub fn build_router(engine: Arc<InMemoryEngine>) -> WithExtraRoutes<MultiService
         .route_matching(aws_emulator_fork_service_account_issuers::claims, move |request| {
             let engine = Arc::clone(&issuers);
             async move { aws_emulator_fork_service_account_issuers::respond(&engine, &request) }
+        })
+        .route_matching(aws_emulator_fork_eks_control_plane::claims, move |request| {
+            let engine = Arc::clone(&control_planes);
+            async move { aws_emulator_fork_eks_control_plane::respond(&engine, &request) }
         })
 }
 

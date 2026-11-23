@@ -39,8 +39,10 @@ const DEFAULT_REGION: &str = "us-east-1";
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Whether the router should hand `request` to [`respond`].
+///
+/// Only its own segment: the other routes under [`PATH_PREFIX`] belong to other crates.
 pub fn claims(request: &Request<Bytes>) -> bool {
-    request.uri().path().starts_with(PATH_PREFIX)
+    cluster_named(request.uri().path()).is_some()
 }
 
 /// Register the key set in `request`'s body for the cluster its path names.

@@ -45,6 +45,27 @@
 //! image, so it records neither. A blob fetch is part of the pull the manifest already
 //! counted, so it records nothing of its own.
 //!
+//! # What a push writes
+//!
+//! A `docker push` (and BuildKit, and containerd) uploads each blob it does not find with
+//! a `HEAD /v2/<name>/blobs/<digest>`, through an upload session
+//! (`POST /v2/<name>/blobs/uploads/`, `PATCH` chunks into it, `PUT ?digest=` to finish) or
+//! in one request (`POST …/uploads/?digest=`), and then `PUT`s the manifest by tag or by
+//! digest. Every write goes through the store functions the control-plane push makes
+//! (`crate::state::image_push`): a session is the same in-flight upload record
+//! `InitiateLayerUpload` opens, a finished blob the same layer record
+//! `CompleteLayerUpload` registers, and a manifest the same image record `PutImage`
+//! stores, so what a registry push wrote is what `DescribeImages`, `ListImages` and
+//! `BatchGetImage` report and what the pull routes above serve. A push to a repository
+//! this registry does not hold creates it when a repository creation template applied
+//! for `CREATE_ON_PUSH` matches its name, and is refused otherwise.
+//!
+//! A cross-repository mount is answered with an upload session, which is what ECR
+//! answers while blob mounting is not enabled for a registry. The one thing a push here
+//! does not do that `PutImage` does is publish its EventBridge event: that takes the
+//! in-process callback an operation context carries, and this plane is served before any
+//! operation is named.
+//!
 //! # Its envelope
 //!
 //! A registry client is not an AWS SDK client: a refusal is the registry API's own error
@@ -131,11 +152,25 @@ pub(super) enum RegistryV2Target {
         /// The digest addressing it.
         digest: String,
     },
+    /// `/v2/<name>/blobs/uploads/`: where a push opens a blob upload session, or uploads a
+    /// whole blob in one request.
+    BlobUploads {
+        /// The repository the blob is pushed into.
+        repository_name: String,
+    },
+    /// `/v2/<name>/blobs/uploads/<uuid>`: one open upload session, which a push appends
+    /// chunks to, asks the progress of, finishes or cancels.
+    BlobUpload {
+        /// The repository the upload was opened against.
+        repository_name: String,
+        /// The id the session was opened under.
+        upload_id: String,
+    },
     /// An endpoint the registry API DEFINES beneath a repository name that this registry
-    /// does not serve — a tag listing, a referrers query, the upload session a push opens —
-    /// or one of the two it does serve, addressed by a path carrying no repository name or
-    /// no reference. It is this registry's to refuse as an unsupported registry operation
-    /// rather than to leave to service discovery.
+    /// does not serve — a tag listing, a referrers query — or one it does serve, addressed
+    /// by a path carrying no repository name or no reference. It is this registry's to
+    /// refuse as an unsupported registry operation rather than to leave to service
+    /// discovery.
     Unserved,
 }
 
@@ -178,6 +213,30 @@ pub(super) fn registry_v2_target(path: &str) -> Option<RegistryV2Target> {
     let (Some(reference), Some(kind)) = (segments.pop(), segments.pop()) else {
         return None;
     };
+    // An upload session lives one level deeper, `<name>/blobs/uploads/<uuid>`, and the
+    // place a session is opened is `<name>/blobs/uploads/` (or, without the trailing slash,
+    // `<name>/blobs/uploads`, which no digest can be confused with).
+    if kind == "uploads" && segments.last() == Some(&"blobs") {
+        segments.pop();
+        let repository_name = segments.join("/");
+        if repository_name.is_empty() {
+            return Some(RegistryV2Target::Unserved);
+        }
+        let repository_name = ::smithy_server_runtime::percent_decode(&repository_name);
+        return Some(if reference.is_empty() {
+            RegistryV2Target::BlobUploads { repository_name }
+        } else {
+            RegistryV2Target::BlobUpload {
+                repository_name,
+                upload_id: ::smithy_server_runtime::percent_decode(reference),
+            }
+        });
+    }
+    if kind == "blobs" && reference == "uploads" && !segments.is_empty() {
+        return Some(RegistryV2Target::BlobUploads {
+            repository_name: ::smithy_server_runtime::percent_decode(&segments.join("/")),
+        });
+    }
     let repository_name = segments.join("/");
     let addressed = !repository_name.is_empty() && !reference.is_empty();
     let decoded = || ::smithy_server_runtime::percent_decode(&repository_name);
@@ -201,20 +260,15 @@ pub(super) fn registry_v2_target(path: &str) -> Option<RegistryV2Target> {
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// Serve one request to this registry's Docker Registry v2 endpoint.
     ///
-    /// The order is the registry API's own: the method, then the credential — a client that
-    /// presents none is challenged before anything about the repository is read, so a
-    /// refused request learns nothing about what this registry holds — and only then the
-    /// content the path addresses.
+    /// The credential is checked first — a client that presents none is challenged before
+    /// anything about the repository or the operation is read, so a refused request learns
+    /// nothing about what this registry holds, and a push is challenged exactly as a pull
+    /// is — then the method the path addresses, and only then the content.
     pub(super) fn serve_registry_v2(
         &self,
         req: &RtRequest,
         target: &RegistryV2Target,
     ) -> RtResponse {
-        if !matches!(req.method(), "GET" | "HEAD") {
-            // The registry API names an operation by method and path together, so a method
-            // this plane does not serve is a registry operation it does not support.
-            return registry_unsupported();
-        }
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return registry_error(500, "UNKNOWN", "the ecr repository store is unavailable");
         };
@@ -236,20 +290,476 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             }
         };
 
+        // The registry API names an operation by method and path together, so a method an
+        // endpoint does not serve is a registry operation this registry does not support.
+        let method = req.method();
         match target {
-            RegistryV2Target::Version => version_check(),
+            RegistryV2Target::Version if is_read(method) => version_check(),
+            RegistryV2Target::Version => registry_unsupported(REGISTRY_READ_METHODS),
             RegistryV2Target::Manifest {
                 repository_name,
                 reference,
-            } => self.serve_manifest(&state, req, repository_name, reference, &principal_arn, now),
+            } => match method {
+                "GET" | "HEAD" => self.serve_manifest(
+                    &state,
+                    req,
+                    repository_name,
+                    reference,
+                    &principal_arn,
+                    now,
+                ),
+                "PUT" => self.put_manifest(&state, req, repository_name, reference, now),
+                _ => registry_unsupported(MANIFEST_METHODS),
+            },
             RegistryV2Target::Blob {
                 repository_name,
                 digest,
-            } => serve_blob(&state, req, repository_name, digest),
-            RegistryV2Target::Unserved => registry_unsupported(),
+            } if is_read(method) => serve_blob(&state, req, repository_name, digest),
+            RegistryV2Target::Blob { .. } => registry_unsupported(REGISTRY_READ_METHODS),
+            RegistryV2Target::BlobUploads { repository_name } if method == "POST" => {
+                start_blob_upload(&state, req, repository_name, now)
+            }
+            RegistryV2Target::BlobUploads { .. } => registry_unsupported(UPLOADS_METHODS),
+            RegistryV2Target::BlobUpload {
+                repository_name,
+                upload_id,
+            } => match method {
+                "GET" => upload_status(&state, repository_name, upload_id),
+                "PATCH" => append_to_upload(&state, req, repository_name, upload_id),
+                "PUT" => finish_upload(&state, req, repository_name, upload_id),
+                "DELETE" => cancel_upload(&state, repository_name, upload_id),
+                _ => registry_unsupported(UPLOAD_SESSION_METHODS),
+            },
+            RegistryV2Target::Unserved => registry_unsupported(REGISTRY_READ_METHODS),
         }
     }
 
+    /// Store the manifest a `PUT /v2/<name>/manifests/<reference>` carries as an image of
+    /// the repository, under the tag the reference names (or, for a digest reference,
+    /// untagged).
+    ///
+    /// The write is the store's own
+    /// ([`store_pushed_image`](crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State::store_pushed_image)),
+    /// the very one `PutImage` makes, so the repository's tag mutability, its caps and the
+    /// registry's byte budget hold the same way and the image is what `DescribeImages`,
+    /// `ListImages` and `BatchGetImage` report. Two things are this endpoint's own:
+    ///
+    /// - a manifest list or image index references other MANIFESTS rather than blobs, and
+    ///   the OCI Distribution Spec refuses one naming a manifest the repository does not
+    ///   hold with `MANIFEST_BLOB_UNKNOWN`, the code it gives a missing blob;
+    /// - a client re-pushing content the repository already holds under the same reference
+    ///   is answered as a push that succeeded, because a registry PUT is idempotent — a
+    ///   `docker push` of an unchanged image re-sends every manifest.
+    ///
+    /// What this plane cannot do that `PutImage` does is publish the push's EventBridge
+    /// event: that needs the in-process callback an operation context carries, and a
+    /// request served before routing has none.
+    fn put_manifest(
+        &self,
+        state: &::engine::ServiceState<
+            crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+        >,
+        req: &RtRequest,
+        repository_name: &str,
+        reference: &str,
+        now: ::std::time::SystemTime,
+    ) -> RtResponse {
+        let Some(manifest) = request_body(req)
+            .and_then(|bytes| ::std::str::from_utf8(bytes).ok())
+            .filter(|text| ::serde_json::from_str::<::serde_json::Value>(text).is_ok())
+        else {
+            return registry_error(400, "MANIFEST_INVALID", MANIFEST_INVALID_MESSAGE);
+        };
+        let digest = crate::state::manifest_digest(manifest);
+        let tag = if crate::state::is_layer_digest(reference) {
+            // A digest reference has to address the very bytes sent.
+            if reference != digest {
+                return registry_error(400, "DIGEST_INVALID", DIGEST_INVALID_MESSAGE);
+            }
+            None
+        } else if is_tag(reference) {
+            Some(reference)
+        } else {
+            return registry_error(400, "TAG_INVALID", TAG_INVALID_MESSAGE);
+        };
+        let media_type = req
+            .headers()
+            .get("content-type")
+            .map(|value| value.split(';').next().unwrap_or(value).trim())
+            .filter(|value| !value.is_empty() && honoured_media_type(value) == *value);
+
+        // Planned with no lock of this store held: the resolution reads AWS Signer's store,
+        // exactly as `PutImage` plans them.
+        let planned_signings =
+            crate::state::signing::planned_signings(&*self.engine, repository_name, now);
+
+        let mut store = state.lock();
+        if let Err(refused) = repository_for_push(&mut store, req, repository_name, now) {
+            return refused;
+        }
+        let Ok(repo) = store.repository(repository_name) else {
+            return registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE);
+        };
+        if let crate::state::ManifestContent::List(children) =
+            crate::state::manifest_content(manifest)
+        {
+            if children.iter().any(|child| !repo.images.contains_key(child)) {
+                return registry_error(400, "MANIFEST_BLOB_UNKNOWN", MANIFEST_BLOB_UNKNOWN_MESSAGE);
+            }
+        }
+        let push = crate::state::ImagePush {
+            repository_name,
+            manifest,
+            media_type,
+            tag,
+            digest: &digest,
+        };
+        match store.store_pushed_image(push, now, planned_signings) {
+            Ok(_) | Err(crate::state::ImagePushRefusal::ImageAlreadyExists { .. }) => {
+                created_response(&format!("/v2/{repository_name}/manifests/{digest}"), &digest)
+            }
+            Err(crate::state::ImagePushRefusal::RepositoryNotFound(_)) => {
+                registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE)
+            }
+            Err(crate::state::ImagePushRefusal::LayersNotFound { .. }) => {
+                registry_error(400, "MANIFEST_BLOB_UNKNOWN", MANIFEST_BLOB_UNKNOWN_MESSAGE)
+            }
+            // ECR's registry endpoint answers an overwrite of an immutable tag as an invalid
+            // tag; the message is the one `PutImage` refuses the same push with.
+            Err(crate::state::ImagePushRefusal::TagImmutable { .. }) => {
+                registry_error(400, "TAG_INVALID", TAG_IMMUTABLE_MESSAGE)
+            }
+            Err(
+                crate::state::ImagePushRefusal::ByteBudgetExhausted
+                | crate::state::ImagePushRefusal::ImageCeilingReached { .. }
+                | crate::state::ImagePushRefusal::TagCeilingReached { .. },
+            ) => registry_error(400, "DENIED", CAPACITY_MESSAGE),
+            Err(crate::state::ImagePushRefusal::NotStored { .. }) => {
+                registry_error(500, "UNKNOWN", "the manifest was not stored")
+            }
+        }
+    }
+}
+
+/// Make sure the repository a push names exists: it does already, or a repository creation
+/// template applied for `CREATE_ON_PUSH` matches the name and the repository is created
+/// from it ("When you push an image to a repository that does not yet exist", ECR creates
+/// it on your behalf). With no matching template the push is refused as one naming an
+/// unknown repository, because ECR "will not create a repository with default settings".
+///
+/// The ARN names the Region the registry host the client reached states
+/// (`<account>.dkr.ecr.<region>.amazonaws.com`), or the default Region for a host that
+/// states none — a registry reached at `localhost`, say.
+fn repository_for_push(
+    store: &mut crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+    req: &RtRequest,
+    repository_name: &str,
+    now: ::std::time::SystemTime,
+) -> Result<(), RtResponse> {
+    if store.repository(repository_name).is_ok() {
+        return Ok(());
+    }
+    let authority = request_authority(req);
+    let host = authority.rsplit_once(':').map_or(authority, |(host, _port)| host);
+    let region = crate::state::ecr_registry_host_parts(host)
+        .map_or(crate::state::DEFAULT_REGION, |(_account, region)| region)
+        .to_string();
+    store
+        .create_repository_on_push(repository_name, &region, now)
+        .map_err(|refusal| match refusal {
+            crate::state::CreateOnPushRefusal::NoMatchingTemplate => {
+                registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE)
+            }
+            crate::state::CreateOnPushRefusal::RepositoryCeilingReached => {
+                registry_error(400, "DENIED", CAPACITY_MESSAGE)
+            }
+        })
+}
+
+/// Whether `method` is one of the two read methods.
+fn is_read(method: &str) -> bool {
+    matches!(method, "GET" | "HEAD")
+}
+
+/// Whether `reference` is a tag as the OCI Distribution Spec spells one:
+/// `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`.
+fn is_tag(reference: &str) -> bool {
+    const MAX_TAG_LENGTH: usize = 128;
+    let mut characters = reference.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    reference.len() <= MAX_TAG_LENGTH
+        && (first.is_ascii_alphanumeric() || first == '_')
+        && characters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// The bytes a request carries, or `None` when its body is not held in memory (the router
+/// buffers every request it dispatches, so that is not reached in practice).
+fn request_body(req: &RtRequest) -> Option<&[u8]> {
+    req.body().bytes()
+}
+
+/// The decoded value of query parameter `name`, or `None` when the query does not carry it.
+fn query_parameter(req: &RtRequest, name: &str) -> Option<String> {
+    let query = req.uri().split_once('?').map(|(_, query)| query)?;
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (::smithy_server_runtime::percent_decode(key) == name)
+            .then(|| ::smithy_server_runtime::percent_decode(value))
+    })
+}
+
+/// The address of one upload session, which every answer about it names in `Location`.
+fn upload_location(repository_name: &str, upload_id: &str) -> String {
+    format!("/v2/{repository_name}/blobs/uploads/{upload_id}")
+}
+
+/// The `Range` an upload session reports: `0-<last byte received>`, which the registry API
+/// spells `0-0` for a session that has received nothing.
+fn received_range(received: usize) -> String {
+    format!("0-{}", received.saturating_sub(1))
+}
+
+/// Open a blob upload (`POST /v2/<name>/blobs/uploads/`), or — with `?digest=` — upload
+/// the whole blob in this one request.
+///
+/// A cross-repository mount (`?mount=&from=`) is answered as ECR answers it while blob
+/// mounting is not enabled for the registry: with a new upload session, so the client
+/// uploads the blob instead. The session is the store's own record of an in-flight upload
+/// ([`open_layer_upload`](crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State::open_layer_upload)),
+/// the same one `InitiateLayerUpload` opens.
+fn start_blob_upload(
+    state: &::engine::ServiceState<
+        crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+    >,
+    req: &RtRequest,
+    repository_name: &str,
+    now: ::std::time::SystemTime,
+) -> RtResponse {
+    let mut store = state.lock();
+    if let Err(refused) = repository_for_push(&mut store, req, repository_name, now) {
+        return refused;
+    }
+    if let Some(claimed) = query_parameter(req, "digest") {
+        let content = request_body(req).unwrap_or_default().to_vec();
+        return register_blob(&mut store, repository_name, &claimed, content);
+    }
+    let Ok(upload_id) = store.open_layer_upload(repository_name, now) else {
+        return registry_error(429, "TOOMANYREQUESTS", UPLOAD_CAPACITY_MESSAGE);
+    };
+    session_response(202, repository_name, &upload_id, 0)
+}
+
+/// Append the chunk a `PATCH` carries to an open upload session.
+///
+/// A `Content-Range` the client states has to begin where the session's received bytes
+/// end; one that does not is refused with `416` and the range the session does hold, so a
+/// client resumes from there. The chunk counts against the same per-upload cap and
+/// registry-wide byte budget an `UploadLayerPart` does.
+fn append_to_upload(
+    state: &::engine::ServiceState<
+        crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+    >,
+    req: &RtRequest,
+    repository_name: &str,
+    upload_id: &str,
+) -> RtResponse {
+    let chunk = request_body(req).unwrap_or_default();
+    let mut store = state.lock();
+    if store.repository(repository_name).is_err() {
+        return registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE);
+    }
+    let has_budget = store.has_byte_budget_for(chunk.len());
+    let Some(upload) = store.upload_mut(repository_name, upload_id) else {
+        return registry_error(404, "BLOB_UPLOAD_UNKNOWN", BLOB_UPLOAD_UNKNOWN_MESSAGE);
+    };
+    if let Err(response) = append_chunk(upload, req, chunk, has_budget) {
+        return response;
+    }
+    let received = upload.received_bytes.len();
+    session_response(202, repository_name, upload_id, received)
+}
+
+/// Append `chunk` to `upload`, honouring a `Content-Range` the request states, or the
+/// refusal the registry answers when it cannot be appended. An empty chunk appends nothing.
+fn append_chunk(
+    upload: &mut crate::state::LayerUpload,
+    req: &RtRequest,
+    chunk: &[u8],
+    has_budget: bool,
+) -> Result<(), RtResponse> {
+    let first_byte = upload.next_part_first_byte();
+    if let Some(range) = req.headers().get("content-range") {
+        let stated_start = range
+            .trim()
+            .trim_start_matches("bytes ")
+            .split('-')
+            .next()
+            .and_then(|start| start.trim().parse::<i64>().ok());
+        if stated_start != Some(first_byte) {
+            let mut refused =
+                registry_error(416, "BLOB_UPLOAD_INVALID", RANGE_NOT_SATISFIABLE_MESSAGE);
+            refused
+                .headers_mut()
+                .insert("range", received_range(upload.received_bytes.len()));
+            return Err(refused);
+        }
+    }
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    if !has_budget {
+        return Err(registry_error(413, "BLOB_UPLOAD_INVALID", CAPACITY_MESSAGE));
+    }
+    let last_byte = first_byte.saturating_add(i64::try_from(chunk.len()).unwrap_or(i64::MAX) - 1);
+    upload
+        .receive_part(first_byte, last_byte, chunk)
+        .map(|_| ())
+        .map_err(|_| registry_error(413, "BLOB_UPLOAD_INVALID", CAPACITY_MESSAGE))
+}
+
+/// Finish an upload session (`PUT …/uploads/<uuid>?digest=`): append the final chunk the
+/// request carries, if any, verify the assembled bytes hash to the digest the client
+/// asserts, and register the blob on the repository.
+///
+/// A digest that does not match leaves the session exactly as it was before this request,
+/// so the client can retry; a match closes the session.
+fn finish_upload(
+    state: &::engine::ServiceState<
+        crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+    >,
+    req: &RtRequest,
+    repository_name: &str,
+    upload_id: &str,
+) -> RtResponse {
+    let chunk = request_body(req).unwrap_or_default();
+    let mut store = state.lock();
+    if store.repository(repository_name).is_err() {
+        return registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE);
+    }
+    let has_budget = store.has_byte_budget_for(chunk.len());
+    let Some(upload) = store.upload_mut(repository_name, upload_id) else {
+        return registry_error(404, "BLOB_UPLOAD_UNKNOWN", BLOB_UPLOAD_UNKNOWN_MESSAGE);
+    };
+    let Some(claimed) = query_parameter(req, "digest") else {
+        return registry_error(400, "DIGEST_INVALID", DIGEST_INVALID_MESSAGE);
+    };
+    let held_before = upload.received_bytes.len();
+    if let Err(response) = append_chunk(upload, req, chunk, has_budget) {
+        return response;
+    }
+    if crate::state::content_digest(&upload.received_bytes) != claimed {
+        upload.received_bytes.truncate(held_before);
+        return registry_error(400, "DIGEST_INVALID", DIGEST_INVALID_MESSAGE);
+    }
+    let assembled = ::std::mem::take(&mut upload.received_bytes);
+    let answered = register_blob(&mut store, repository_name, &claimed, assembled);
+    if answered.status().as_u16() == 201 {
+        store.uploads.remove(upload_id);
+    }
+    answered
+}
+
+/// Register `content` on `repository_name` under `claimed`, once it is verified to be the
+/// digest of exactly those bytes: `201` addressing the blob, or the refusal.
+///
+/// The registration is the store's own
+/// ([`register_layer_blob`](crate::state::Repo::register_layer_blob)), the very one
+/// `CompleteLayerUpload` makes. A blob the repository already holds is a success here, as a
+/// registry PUT is: the client's bytes are the ones the repository holds.
+fn register_blob(
+    store: &mut crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+    repository_name: &str,
+    claimed: &str,
+    content: Vec<u8>,
+) -> RtResponse {
+    if crate::state::content_digest(&content) != claimed {
+        return registry_error(400, "DIGEST_INVALID", DIGEST_INVALID_MESSAGE);
+    }
+    if !store.has_byte_budget_for(content.len()) {
+        return registry_error(413, "BLOB_UPLOAD_INVALID", CAPACITY_MESSAGE);
+    }
+    let Ok(repo) = store.repository_mut(repository_name) else {
+        return registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE);
+    };
+    if repo.register_layer_blob(claimed, content).is_err() {
+        return registry_error(400, "DENIED", CAPACITY_MESSAGE);
+    }
+    created_response(&format!("/v2/{repository_name}/blobs/{claimed}"), claimed)
+}
+
+/// The progress of an upload session: `204` with the range received so far.
+fn upload_status(
+    state: &::engine::ServiceState<
+        crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+    >,
+    repository_name: &str,
+    upload_id: &str,
+) -> RtResponse {
+    let mut store = state.lock();
+    if store.repository(repository_name).is_err() {
+        return registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE);
+    }
+    let Some(upload) = store.upload_mut(repository_name, upload_id) else {
+        return registry_error(404, "BLOB_UPLOAD_UNKNOWN", BLOB_UPLOAD_UNKNOWN_MESSAGE);
+    };
+    let received = upload.received_bytes.len();
+    session_response(204, repository_name, upload_id, received)
+}
+
+/// Cancel an upload session: its bytes are dropped and its id resolves to nothing.
+fn cancel_upload(
+    state: &::engine::ServiceState<
+        crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+    >,
+    repository_name: &str,
+    upload_id: &str,
+) -> RtResponse {
+    let mut store = state.lock();
+    if store.repository(repository_name).is_err() {
+        return registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE);
+    }
+    if store.upload_mut(repository_name, upload_id).is_none() {
+        return registry_error(404, "BLOB_UPLOAD_UNKNOWN", BLOB_UPLOAD_UNKNOWN_MESSAGE);
+    }
+    store.uploads.remove(upload_id);
+    empty_response(204)
+}
+
+/// An answer about an upload session: its `Location`, its id, and the range received.
+fn session_response(
+    status_code: u16,
+    repository_name: &str,
+    upload_id: &str,
+    received: usize,
+) -> RtResponse {
+    let mut response = empty_response(status_code);
+    let headers = response.headers_mut();
+    headers.insert("location", upload_location(repository_name, upload_id));
+    headers.insert("docker-upload-uuid", upload_id.to_string());
+    headers.insert("range", received_range(received));
+    response
+}
+
+/// `201 Created` for content now stored at `location` under `digest`.
+fn created_response(location: &str, digest: &str) -> RtResponse {
+    let mut response = empty_response(201);
+    let headers = response.headers_mut();
+    headers.insert("location", location.to_string());
+    headers.insert(CONTENT_DIGEST_HEADER, digest.to_string());
+    response
+}
+
+/// An answer with no body, carrying the registry API version header.
+fn empty_response(status_code: u16) -> RtResponse {
+    let mut response = RtResponse::new(status(status_code), SdkBody::empty());
+    registry_headers(&mut response);
+    response.headers_mut().insert("content-length", "0");
+    response
+}
+
+impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// Serve the manifest `reference` addresses in `repository_name` — and, for a `GET`,
     /// record the pull it is.
     ///
@@ -508,6 +1018,45 @@ const UNAUTHORIZED_MESSAGE: &str = "authentication required";
 /// The body of a refusal to a registry operation this registry does not serve.
 const UNSUPPORTED_MESSAGE: &str = "the operation is unsupported";
 
+/// The body of a refusal that found no upload session under the id.
+const BLOB_UPLOAD_UNKNOWN_MESSAGE: &str = "blob upload unknown to registry";
+
+/// The body of a refusal whose digest is not the digest of the content sent.
+const DIGEST_INVALID_MESSAGE: &str = "provided digest did not match uploaded content";
+
+/// The body of a refusal of a manifest that is not a JSON document.
+const MANIFEST_INVALID_MESSAGE: &str = "manifest invalid";
+
+/// The body of a refusal of a manifest naming a blob or manifest the repository does not
+/// hold.
+const MANIFEST_BLOB_UNKNOWN_MESSAGE: &str = "blob unknown to registry";
+
+/// The body of a refusal of a reference that is neither a digest nor a valid tag.
+const TAG_INVALID_MESSAGE: &str = "manifest tag did not match URI";
+
+/// The body of a refusal to move a tag the repository holds immutable.
+const TAG_IMMUTABLE_MESSAGE: &str =
+    "The image tag already exists in the repository and cannot be overwritten because the \
+     tag is immutable.";
+
+/// The body of a refusal of a chunk that does not begin where the upload's bytes end.
+const RANGE_NOT_SATISFIABLE_MESSAGE: &str = "requested range not satisfiable";
+
+/// The body of a refusal that would take this registry past its own storage bounds.
+const CAPACITY_MESSAGE: &str = "the push would exceed this registry's storage limits";
+
+/// The body of a refusal to open an upload while the registry holds its maximum of them.
+const UPLOAD_CAPACITY_MESSAGE: &str = "this registry holds its maximum of in-flight uploads";
+
+/// The methods the manifest endpoint serves.
+const MANIFEST_METHODS: &str = "GET, HEAD, PUT";
+
+/// The method the upload-opening endpoint serves.
+const UPLOADS_METHODS: &str = "POST";
+
+/// The methods an upload session serves.
+const UPLOAD_SESSION_METHODS: &str = "GET, PATCH, PUT, DELETE";
+
 /// The challenge a request presenting no honoured credential is refused with: a `401`
 /// naming the scheme and the realm a client fetches a credential from, which is how
 /// `docker login` discovers where to authenticate.
@@ -530,12 +1079,12 @@ fn unauthorized(req: &RtRequest) -> RtResponse {
 
 /// The refusal a registry operation this registry does not serve is answered with. RFC 9110
 /// requires a `405` to state which methods the target does support, so the refusal names
-/// them in `Allow` as well.
-fn registry_unsupported() -> RtResponse {
+/// them — `allowed` — in `Allow` as well.
+fn registry_unsupported(allowed: &'static str) -> RtResponse {
     let mut response = registry_error(405, "UNSUPPORTED", UNSUPPORTED_MESSAGE);
     response
         .headers_mut()
-        .insert(::http::header::ALLOW.as_str(), REGISTRY_READ_METHODS);
+        .insert(::http::header::ALLOW.as_str(), allowed);
     response
 }
 

@@ -326,9 +326,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let repo = store
             .repository_mut(&input.repository_name)
             .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
-        if !repo.layer_blobs.contains_key(&digest)
-            && repo.layer_blobs.len() >= crate::state::MAX_LAYERS_PER_REPOSITORY
-        {
+        // The registration is the store's own (`register_layer_blob`), shared with the
+        // registry endpoint's upload finish, so a blob pushed through either surface is one
+        // record of the repository.
+        let registration = repo.register_layer_blob(&digest, assembled);
+        let Ok(registration) = registration else {
             return Err(refusal(
                 "repository layer ceiling reached",
                 &caller_akid,
@@ -341,12 +343,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }),
             )
             .into());
-        }
+        };
         // The repository already holds this blob, so there is nothing to register: the
         // upload is closed either way, because its bytes have been accounted for. The
         // refusal names the upload by the id the REQUEST addressed it by — see
         // `crate::state::layer_already_exists_message`.
-        if repo.layer_blobs.contains_key(&digest) {
+        if registration == crate::state::BlobRegistration::AlreadyHeld {
             store.uploads.remove(&input.upload_id);
             return Err(refusal(
                 "layer already in the repository",
@@ -363,25 +365,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        // The blob joins the repository, addressed by the digest the registry computed,
-        // and the upload it came from is closed: its id resolves to nothing afterwards.
-        // The media type stays unset — a blob's media type is what a manifest
-        // referencing it declares, which this call carries nothing of. The assembled
-        // BYTES are what the repository now holds the layer as, so a later
-        // `GetDownloadUrlForLayer` serves exactly them; what they are a filesystem OF is
-        // read here, once, while they are in hand, so a later basic image scan does not
-        // walk the archive again.
-        let filesystem = crate::state::scan_layer_filesystem(&assembled);
-        repo.layer_blobs.insert(
-            digest.clone(),
-            crate::state::LayerBlob {
-                digest: digest.clone(),
-                size: Some(layer_size),
-                media_type: None,
-                filesystem,
-                content: assembled,
-            },
-        );
+        // The blob joined the repository, addressed by the digest the registry computed,
+        // holding the assembled BYTES a later `GetDownloadUrlForLayer` serves; the upload
+        // it came from is closed, so its id resolves to nothing afterwards.
         store.uploads.remove(&input.upload_id);
 
         // Audit record for a state-changing operation: who asked, what changed, how it

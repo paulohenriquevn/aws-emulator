@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeTags
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeTags`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeTags::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! fork: implemented (paulohenriquevn/aws-emulator#16). Reports one `TagDescription` per tag
+//! of every resource `CreateTags` can tag, read through the ONE enumeration of those
+//! resources ([`crate::state::ComAmazonawsEc2Amazonec2State::tagged_resources`]), which is
+//! expanded from the same list `CreateTags` and `DeleteTags` resolve an id against
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::resource_tags_mut`]). So a tag either
+//! operation writes or removes is what a later `DescribeTags` reports, whatever kind of
+//! resource carries it.
+//!
+//! This is a REPORT: the stored tags are read and no tag is written. The `key`, `value`,
+//! `resource-id`, `resource-type` and `tag:<key>` filters select tags, every value of one
+//! filter joined with OR and the filters with AND (`Filter`); any other filter name is
+//! refused. `MaxResults` outside 5..=1000 is refused with `InvalidParameterValue`, and the
+//! answer pages over (`ResourceId`, `Key`), the one stable order its `NextToken` names a
+//! position in.
+//!
+//! A resource the store places in another Region than the request's is not reported
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::tagged_resource_is_in_region`]); the
+//! store records a Region only for VPCs, what belongs to one VPC, and instances, so every
+//! other kind is reported to every Region, as `CreateTags` reaches it from every Region.
 //!
 //! ## Shape of an operation
 //!
@@ -149,18 +160,256 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeTags` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeTagsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeTags"))
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            CompiledFilter, MAX_FILTER_MATCH_STEPS, MAX_FILTER_VALUE_BYTES, MAX_FILTER_VALUES,
+            MAX_FILTERS, MatchBudget, PageTokenRule, decode_page_token,
+            invalid_pagination_token_for, matches_every_filter,
+            max_results_outside_published_range, page_from_cursor, require_service_state,
+        };
+
+        // The Region this request was signed for: EC2 is reached through a regional
+        // endpoint, so a resource the store places in another Region is not reported
+        // ([`crate::state::ComAmazonawsEc2Amazonec2State::tagged_resource_is_in_region`]).
+        let region = crate::state::request_region(ctx.parts());
+
+        // "This value can be between 5 and 1000" (`DescribeTagsRequest$MaxResults`). The
+        // member targets a plain `Integer` with no `@range`, so the handler is the only
+        // place that bound is enforced, and it is enforced before anything else is read.
+        if let Some(max_results) = input.max_results {
+            if !(MIN_TAGS_PER_PAGE..=MAX_TAGS_PER_PAGE).contains(&max_results) {
+                return Err(max_results_outside_published_range(
+                    MIN_TAGS_PER_PAGE,
+                    MAX_TAGS_PER_PAGE,
+                ));
+            }
+        }
+
+        // Matching cost is filters x values x tags and the model bounds none of them, so the
+        // request-controlled factors are capped here, before any work proportional to them
+        // is done, and their PRODUCT is charged to one [`MatchBudget`] below.
+        let supplied_filters = input.filters.as_ref().map_or(0, Vec::len);
+        if supplied_filters > MAX_FILTERS {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "The request carries {supplied_filters} filters, above the maximum \
+                 of {MAX_FILTERS}"
+            )));
+        }
+
+        // A filter name this operation does not document is refused whether or not any tag
+        // would have matched it, so an unsupported filter can never read as "no results".
+        let filters: &[Filter] = input.filters.as_deref().unwrap_or_default();
+        let mut selectors: Vec<CompiledFilter> = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let name = filter.name.as_deref().unwrap_or_default();
+            if !is_documented_filter_name(name) {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "The filter '{name}' is invalid"
+                )));
+            }
+            let values = filter.values.as_deref().unwrap_or_default();
+            if values.len() > MAX_FILTER_VALUES {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "The filter '{name}' carries {} values, above the maximum of \
+                     {MAX_FILTER_VALUES}",
+                    values.len()
+                )));
+            }
+            // A capped NUMBER of comparisons is not capped WORK: the matcher's cost is the
+            // product of the pattern's length and the value's, so each value's size is
+            // bounded too, before any matching runs under the lock.
+            if let Some(oversize) = values
+                .iter()
+                .find(|value| value.len() > MAX_FILTER_VALUE_BYTES)
+            {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "A value of the filter '{name}' carries {} bytes, above the maximum of \
+                     {MAX_FILTER_VALUE_BYTES}",
+                    oversize.len()
+                )));
+            }
+            selectors.push(CompiledFilter::new(name.to_string(), values.to_vec()));
+        }
+
+        // "The token returned from a previous paginated request" (`$NextToken`): a token
+        // this operation did not mint is refused rather than read as a position, before the
+        // store is read, so a bogus token can never be answered with a page.
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                decode_page_token(token).ok_or_else(|| invalid_pagination_token_for(token))?,
+            ),
+        };
+
+        // "Checks whether you have the required permissions for the action, without
+        // actually making the request" (`DescribeTagsRequest$DryRun`). A request that
+        // reaches this handler is one the service-wide authorization gate admitted
+        // ([`crate::service::authorization`]), so the caller holds `ec2:DescribeTags` and is
+        // answered the permitted side of the probe, after every check above that would
+        // have refused the request itself and before anything is read.
+        if input.dry_run == Some(true) {
+            return Err(Scaffolded::dry_run_operation());
+        }
+
+        let state = require_service_state(&*self.engine)?;
+        let mut store = state.lock();
+        // The clock-owed transitions this read is allowed to apply, the same call
+        // `CreateTags` makes before it resolves an id: what they remove is gone whether or
+        // not anybody called, so applying them here changes nothing a later caller would
+        // not have seen anyway.
+        store.materialize_due_transitions();
+
+        // Every comparison is charged to ONE budget, so the PRODUCT of stored tags, filters,
+        // values and value length is bounded however the caller combines them, which is
+        // also what bounds how long this holds the state lock.
+        let mut budget = MatchBudget::new(MAX_FILTER_MATCH_STEPS);
+        let mut selected: Vec<Row> = Vec::new();
+        for resource in store.tagged_resources() {
+            if budget.exhausted() {
+                break;
+            }
+            if resource.tags.is_empty() || !store.tagged_resource_is_in_region(&resource, &region)
+            {
+                continue;
+            }
+            for (key, value) in &resource.tags {
+                if budget.exhausted() {
+                    break;
+                }
+                // The AND/OR evaluation and the per-candidate budget charge are the shared
+                // ones; only what ONE tag holds for a filter name is local.
+                if matches_every_filter(&selectors, &mut budget, &|name| {
+                    filter_values(&resource, key, value, name)
+                }) {
+                    selected.push(Row::new(&resource, key, value));
+                }
+            }
+        }
+        // A spent budget means the answer is INCOMPLETE, which is not something to report as
+        // a result: the request is told so rather than given a silently truncated page.
+        if budget.exhausted() {
+            return Err(Scaffolded::request_limit_exceeded(format!(
+                "The request's filters would take more than {MAX_FILTER_MATCH_STEPS} \
+                 comparisons to evaluate; narrow them or page with MaxResults"
+            )));
+        }
+
+        // Page in (`ResourceId`, `Key`) order, which the cursor below names a position in.
+        // A resource holds one tag per key, so the order is total and the cursor always
+        // advances.
+        selected.sort_by(|left, right| left.position.cmp(&right.position));
+
+        // A request that names no page size gets the largest page this operation serves, so
+        // the `NextToken` path behaves the same whether or not a page size was asked for.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(DEFAULT_TAGS_PER_PAGE)
+            .clamp(1, DEFAULT_TAGS_PER_PAGE);
+
+        // "This value is null when there are no more items to return"
+        // (`DescribeTagsResult$NextToken`): a token only while a further tag follows the
+        // page, through the one definition of EC2 paging ([`page_from_cursor`]).
+        let (page, next_token) = page_from_cursor(
+            &selected,
+            start_at.as_deref(),
+            Some(limit),
+            PageTokenRule::WhenAnotherItemFollows,
+            |row| row.position.as_str(),
+        );
+
+        Ok(DescribeTagsOutput {
+            next_token,
+            tags: Some(page.iter().map(|row| row.description.clone()).collect()),
+        })
+    }
+}
+
+/// One tag selected for the answer: what it reports, and its position in the paging order.
+struct Row {
+    description: TagDescription,
+    /// `<ResourceId>` NUL `<Key>`. No resource id carries a NUL, and NUL sorts before every
+    /// other character, so comparing these strings orders the rows exactly as comparing
+    /// (`ResourceId`, `Key`) pairs would, which is the order a cursor names a position in.
+    position: String,
+}
+
+impl Row {
+    fn new(resource: &crate::state::TaggedResource<'_>, key: &str, value: &str) -> Self {
+        Self {
+            description: TagDescription {
+                key: Some(key.to_string()),
+                resource_id: Some(resource.resource_id.to_string()),
+                resource_type: Some(resource.resource_type.to_string()),
+                value: Some(value.to_string()),
+            },
+            position: format!("{}\u{0}{key}", resource.resource_id),
+        }
+    }
+}
+
+/// The smallest `MaxResults` this operation accepts: "this value can be between 5 and 1000"
+/// (`DescribeTagsRequest$MaxResults`).
+const MIN_TAGS_PER_PAGE: i32 = 5;
+
+/// The largest it accepts, from the same sentence.
+const MAX_TAGS_PER_PAGE: i32 = 1000;
+
+/// The page size a request that names none gets: this operation's own documented maximum,
+/// so one answer is never larger than a page a caller could have asked for.
+const DEFAULT_TAGS_PER_PAGE: usize = MAX_TAGS_PER_PAGE as usize;
+
+/// The filter names this operation documents with no variable part, from
+/// `DescribeTagsRequest$Filters`:
+///
+/// ```text
+/// smithy_query(query="doc",shape="DescribeTagsRequest",member="Filters",model_path="services/service-com-amazonaws-ec2-amazonec2/smithy-model/com-amazonaws-ec2-amazonec2.json")
+/// ```
+///
+/// `tag:<key>` is the one name with a variable part, so it is matched by prefix in
+/// [`is_documented_filter_name`]. `tag-key` and `tag-value`, which other describes answer,
+/// are NOT documented here: `key` and `value` are this operation's names for them. Every
+/// entry here must be answered by [`filter_values`].
+const TAG_DESCRIPTION_FILTERS: [&str; 4] = ["key", "resource-id", "resource-type", "value"];
+
+/// Whether `name` is a filter this operation answers.
+///
+/// "Filter names are case-sensitive" (`Filter$Name`), so every comparison is exact, and a
+/// `tag:` prefix with no key names no tag, so it is as undocumented as any other misspelling.
+fn is_documented_filter_name(name: &str) -> bool {
+    name.strip_prefix(crate::state::TAG_FILTER_PREFIX)
+        .is_some_and(|key| !key.is_empty())
+        || TAG_DESCRIPTION_FILTERS.contains(&name)
+}
+
+/// The values ONE tag of `resource` holds for the filter `name`.
+///
+/// `key`, `value`, `resource-id` and `resource-type` read the tag's own row. `tag:<key>`
+/// reads the RESOURCE: "the key/value combination of the tag ... to find resources with the
+/// tag `Owner=TeamA`", so every tag of a resource carrying that pair is selected, the way a
+/// describe of the resource itself selects it. A resource carrying no tag of that key holds
+/// no value for it and selects nothing.
+fn filter_values<'a>(
+    resource: &crate::state::TaggedResource<'a>,
+    key: &'a str,
+    value: &'a str,
+    name: &str,
+) -> Vec<::std::borrow::Cow<'a, str>> {
+    use ::std::borrow::Cow;
+    if let Some(tag_key) = name.strip_prefix(crate::state::TAG_FILTER_PREFIX) {
+        return resource
+            .tags
+            .get(tag_key)
+            .map(|held| Cow::Borrowed(*held))
+            .into_iter()
+            .collect();
+    }
+    match name {
+        "key" => vec![Cow::Borrowed(key)],
+        "value" => vec![Cow::Borrowed(value)],
+        "resource-id" => vec![Cow::Borrowed(resource.resource_id)],
+        "resource-type" => vec![Cow::Borrowed(resource.resource_type)],
+        // Only documented names reach here: the handler refused every other one.
+        _ => Vec::new(),
     }
 }

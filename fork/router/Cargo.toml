@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 aws-emulator-fork-console = { workspace = true }
 aws-emulator-fork-service-account-issuers = { workspace = true }
+aws-emulator-fork-eks-control-plane = { workspace = true }
 aws-emulator-fork-access-log = { workspace = true }
 aws-emulator-fork-iam-gate = { workspace = true }
 engine = { workspace = true }
@@ -56,6 +57,8 @@ service-com-amazonaws-pricing-awspricelistservice = { workspace = true }
 service-com-amazonaws-eksauth-eksauthfrontend = { workspace = true }
 
 [dev-dependencies]
+# The request body cap test drives read_production_body with an axum body.
+axum = "0.8"
 rustls = { workspace = true }
 serde_json = { workspace = true }
 ring = "0.17"

@@ -18,6 +18,9 @@ mod prefix_lists;
 // fork: CreateTags/DeleteTags on network ACLs, the default one included (aws/aws-emulator#76).
 #[path = "all/network_acl_tags.rs"]
 mod network_acl_tags;
+// fork: DescribeTags reports the tags CreateTags writes (paulohenriquevn/aws-emulator#16).
+#[path = "all/describe_tags.rs"]
+mod describe_tags;
 // fork: an all-protocols revoke matches whatever ports it names (aws/aws-emulator#46).
 #[path = "all/security_group_all_protocols_revoke.rs"]
 mod security_group_all_protocols_revoke;

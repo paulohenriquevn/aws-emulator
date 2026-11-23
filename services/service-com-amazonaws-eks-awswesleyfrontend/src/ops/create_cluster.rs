@@ -695,6 +695,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ))
             })?;
 
+        // fork: who provisions the control plane decides who owes the cluster its
+        // `ACTIVE`: the clock, or the external provisioner's registration
+        // (fork/eks-control-plane).
+        let provisioning = state::control_plane_provisioning(
+            ::std::env::var(state::CONTROL_PLANE_ENV).ok().as_deref(),
+        )
+        .map_err(|defect| {
+            CreateClusterError::from(CreateClusterErrorModeled::ServerException(
+                ServerException {
+                    cluster_name: Some(input.name.clone()),
+                    message: Some(defect),
+                    ..Default::default()
+                },
+            ))
+        })?;
+        let active_at = match provisioning {
+            state::ControlPlaneProvisioning::Emulated => Some(now + CLUSTER_ACTIVATION_DELAY),
+            state::ControlPlaneProvisioning::External => None,
+        };
+
         let record = ClusterRecord {
             name: input.name.clone(),
             endpoint: Some(state::derive_cluster_endpoint(&resource_id, &region)),
@@ -720,7 +740,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             kubernetes_network_config: Some(kubernetes_network_config),
             logging: Some(state::reported_logging(input.logging.as_ref())),
             status: STATUS_CREATING.to_string(),
-            active_at: Some(now + CLUSTER_ACTIVATION_DELAY),
+            active_at,
             // Nothing of the control plane itself exists yet: the clock owes this
             // cluster its `ACTIVE` status, and provisioning it is what fills in
             // the endpoint, the identity, the certificate authority data and the

@@ -21,6 +21,14 @@ const SIGV4_ALGORITHM: &str = "AWS4-HMAC-SHA256";
 /// The query fields of a presigned URL that the signer adds back itself.
 /// Seven days, the longest validity AWS accepts for a presigned URL.
 const MAX_PRESIGNED_EXPIRES_SECS: u64 = 604_800;
+/// fork: how long STS accepts a presigned GetCallerIdentity, whatever its X-Amz-Expires.
+const PRESIGNED_GET_CALLER_IDENTITY_SECS: u64 = 900;
+
+/// fork: whether the request is a presigned STS GetCallerIdentity, an EKS token's request.
+fn presigned_get_caller_identity(parts: &Parts, signed: &Signature) -> bool {
+    crate::normalize_service_key(signed.signing_name()) == "sts"
+        && presigned_field(parts, "Action").is_some_and(|action| action == "GetCallerIdentity")
+}
 
 const PRESIGNED_FIELDS: &str = "Algorithm Credential Date Expires SignedHeaders Signature";
 
@@ -209,6 +217,15 @@ impl RequestAuthenticator for SigV4Authenticator {
             if secs > MAX_PRESIGNED_EXPIRES_SECS {
                 return true;
             }
+            // fork: STS ignores X-Amz-Expires on a presigned GetCallerIdentity, the request an
+            // EKS token carries, and accepts it for 15 minutes from X-Amz-Date: `aws eks
+            // get-token` presigns for 60 seconds and kubectl reuses the token for 14 minutes
+            // (kubernetes-sigs/aws-iam-authenticator, pkg/token/token.go).
+            let secs = if presigned_get_caller_identity(parts, &signed) {
+                PRESIGNED_GET_CALLER_IDENTITY_SECS
+            } else {
+                secs
+            };
             let at = parse_amz_date(&signed.amz_date);
             let valid_until = at.and_then(|at| at.checked_add(Duration::from_secs(secs)));
             valid_until.is_none_or(|valid_until| valid_until < SystemTime::now())

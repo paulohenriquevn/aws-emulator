@@ -412,6 +412,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-emulator-fork-eks-control-plane"
+version = "0.1.0"
+dependencies = [
+ "aws-emulator-engine",
+ "aws-emulator-server",
+ "bytes",
+ "http",
+ "serde_json",
+ "service-com-amazonaws-eks-awswesleyfrontend",
+]
+
+[[package]]
 name = "aws-emulator-fork-iam-gate"
 version = "0.1.0"
 dependencies = [
@@ -434,12 +446,14 @@ dependencies = [
  "aws-emulator-engine",
  "aws-emulator-fork-access-log",
  "aws-emulator-fork-console",
+ "aws-emulator-fork-eks-control-plane",
  "aws-emulator-fork-iam-gate",
  "aws-emulator-fork-service-account-issuers",
  "aws-emulator-server",
  "aws-emulator-smithy-server-runtime",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
+ "axum 0.8.9",
  "bytes",
  "http",
  "ring",

@@ -7,6 +7,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
+### Added
+- The ECR registry endpoint accepts `docker push`: blob upload sessions (`POST`, chunked `PATCH`, `PUT` with digest check, monolithic `POST ?digest=`, status and cancel), and `PUT` of Docker schema 2 and OCI manifests and indexes, which checks that referenced blobs exist and honours tag immutability. A pushed image is listed by `ListImages` and `DescribeImages` and pulls back through the registry endpoint (#19)
+- A push to a repository that does not exist creates it from the most specific repository creation template whose `appliedFor` includes `CREATE_ON_PUSH`, with the template's settings, as on ECR; without a matching template the push is refused with `NAME_UNKNOWN` (#19)
+- `fork/eks-provisioner`: nodes pull images from the emulator's ECR with no `imagePullSecret`, as Amazon EKS nodes pull from ECR. Each node trusts the emulator's CA for the registry host (the host of `AWS_ENDPOINT_URL`) in containerd's `certs.d`, and its kubelet runs an image credential provider that gets a fresh ECR authorization token from the provisioner, which answers only a kubelet of the cluster. Nodes that joined earlier are configured on the next reconcile (#21)
+- `EMULATOR_MAX_BODY_BYTES` raises the 16 MiB cap on request bodies, so a deployment that receives image layers, which `docker push` sends in one request, can accept them (#19)
+
+## [0.3.1] - 2026-11-23
+
+### Fixed
+- An Application Load Balancer answers a request a browser sends from another site, and its CORS preflight, from its listener rules, as on AWS. The front door refused them with 403 `AccessDenied`, so a single-page app could not call an API behind a load balancer on another host (#17)
+
+## [0.3.0] - 2026-11-23
+
+### Added
+- eks-provisioner: `--pod-identity-webhook-image` (or `POD_IDENTITY_WEBHOOK_IMAGE`) runs a copy of the pod identity webhook image, pinned by digest, on a host whose address ECR Public throttles (#15)
+- `EMULATOR_EKS_CONTROL_PLANE=external` leaves an EKS cluster `CREATING` until a provisioner outside the emulator registers its API server with `PUT /_fork/eks/clusters/{name}/control-plane`, which turns it `ACTIVE` with that endpoint; `GET` on the same route answers the cluster's issuer, version and certificate authority, signing key included (#15)
+- `fork/eks-provisioner` runs the control plane of each EKS cluster in kind, signed by the cluster's CA and issuing tokens as its OIDC issuer, joins each node group instance as a node at its private address, authenticates `aws eks get-token` tokens against the cluster's access entries, and deletes the kind cluster with the EKS cluster (#15)
+- A version tag also publishes the provisioner binary, with its SHA-256, on the tag's GitHub release (#15)
+- `fork/eks-provisioner` installs `amazon-eks-pod-identity-webhook` v0.6.19 on each cluster's control-plane node before the cluster turns `ACTIVE`, so a pod whose service account carries `eks.amazonaws.com/role-arn` gets IRSA as on Amazon EKS (#15)
+- `fork/eks-provisioner` gives every container of a pod created outside `kube-system` the emulator's endpoint (`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_STS`) and CA (`AWS_CA_BUNDLE` and `SSL_CERT_FILE` with the public roots, `NODE_EXTRA_CA_CERTS`) through a mutating webhook it serves, and leaves alone a pod that sets `AWS_ENDPOINT_URL` (#15)
+- `fork/eks-provisioner/e2e.sh` checks that a pod with an IRSA service account and no AWS variable of its own is the role for `aws sts get-caller-identity` (#15)
+
+### Fixed
+- eks-provisioner: a pod identity webhook that never becomes available is reported with what its pods wait for (scheduling, image pull, crash), and stopping on shutdown no longer logs `%!w(<nil>)` (#15)
+- An EKS token is accepted for 15 minutes from its signing, as Amazon EKS and STS accept it: the emulator's STS and the provisioner refused it once its 60 second presign expiry passed, so a long `helm --wait` failed with `Unauthorized` (#15)
+- A `kube-system` pod with an IRSA role, such as the AWS Load Balancer Controller, gets the emulator's endpoint and CA, instead of exchanging its token at the real STS (#15)
+- `fork/eks-provisioner` tears down only the kind clusters it keeps a state directory for, and `e2e.sh` deletes only its own kind cluster and Docker network, so neither removes the clusters of another provisioner on the same host; the Docker network it creates for a VPC carries the VPC's CIDR in its name, so a second emulator's VPC with the same id gets a network of its own (#15)
+- EC2 `DescribeTags` reports the tags `CreateTags` writes, each with its key, value, resource id and resource type, filtered by `key`, `value`, `resource-id`, `resource-type` and `tag:<key>` and paged by `MaxResults` (5 to 1000) and `NextToken`; it answered 501 for every request, so `aws_ec2_tag` could not apply (#16)
+
 ## [0.2.0] - 2026-11-20
 
 ### Added
@@ -65,6 +96,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - An RDS instance or cluster created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves that port, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
 - The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)
 
-[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/paulohenriquevn/aws-emulator/releases/tag/v0.1.0

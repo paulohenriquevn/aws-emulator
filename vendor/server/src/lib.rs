@@ -907,10 +907,31 @@ pub async fn serve_on_ephemeral_port<S: EmulatorService>(service: S) -> (String,
 }
 
 /// Upper bound on a request/response body buffered when bridging a request
-/// through a [`EmulatorService`] on the production serve path. The emulator serves
-/// small canned fixtures; this only guards against an accidentally unbounded
-/// stream. A larger request is answered `413 Payload Too Large`.
-const MAX_PRODUCTION_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// through a [`EmulatorService`] on the production serve path, unless
+/// [`MAX_BODY_BYTES_ENV`] raises it. It guards against an accidentally unbounded
+/// stream; a larger request is answered `413 Payload Too Large`. A deployment
+/// that receives image layers through the ECR registry endpoint raises it, since
+/// `docker push` sends a whole layer in one request.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// The environment variable that sets the request body cap, in bytes.
+pub const MAX_BODY_BYTES_ENV: &str = "EMULATOR_MAX_BODY_BYTES";
+
+/// The request body cap: [`MAX_BODY_BYTES_ENV`], or [`DEFAULT_MAX_BODY_BYTES`]
+/// when it is unset, unparseable or zero. Read once per process.
+fn max_production_body_bytes() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| parse_body_limit(std::env::var(MAX_BODY_BYTES_ENV).ok().as_deref()))
+}
+
+/// Pure core of the body cap: the parsed value, or [`DEFAULT_MAX_BODY_BYTES`] for
+/// an absent, unparseable or zero value.
+pub fn parse_body_limit(raw: Option<&str>) -> usize {
+    match raw.map(|value| value.trim().parse::<usize>()) {
+        Some(Ok(limit)) if limit > 0 => limit,
+        _ => DEFAULT_MAX_BODY_BYTES,
+    }
+}
 
 /// How long a client on the production data port may take to send a request's
 /// headers before its connection is closed, so a client that opens connections
@@ -972,7 +993,7 @@ async fn emulator_service_fallback<S: EmulatorService>(
     req: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = req.into_parts();
-    let body_bytes = match read_production_body(body).await {
+    let body_bytes = match read_production_body(body, max_production_body_bytes()).await {
         Ok(b) => b,
         Err(status) => {
             return axum::response::Response::builder()
@@ -987,15 +1008,18 @@ async fn emulator_service_fallback<S: EmulatorService>(
     axum::response::Response::from_parts(resp_parts, axum::body::Body::from(resp_body))
 }
 
-/// Buffers a request body: declared past [`MAX_PRODUCTION_BODY_BYTES`] it is a `413` before any
-/// of it is read, past the cap as it arrives a `413`, not finished within [`BODY_READ_TIMEOUT`] a
-/// `408`, and unreadable (a reset or malformed stream) a `400`.
-async fn read_production_body(body: axum::body::Body) -> Result<bytes::Bytes, http::StatusCode> {
+/// Buffers a request body: declared past `limit` it is a `413` before any of it is read, past
+/// `limit` as it arrives a `413`, not finished within [`BODY_READ_TIMEOUT`] a `408`, and
+/// unreadable (a reset or malformed stream) a `400`.
+pub async fn read_production_body(
+    body: axum::body::Body,
+    limit: usize,
+) -> Result<bytes::Bytes, http::StatusCode> {
     let declared = axum::body::HttpBody::size_hint(&body).exact();
-    if declared.is_some_and(|length| length > MAX_PRODUCTION_BODY_BYTES as u64) {
+    if declared.is_some_and(|length| length > limit as u64) {
         return Err(refused_unread(body));
     }
-    let read = axum::body::to_bytes(body, MAX_PRODUCTION_BODY_BYTES);
+    let read = axum::body::to_bytes(body, limit);
     match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
         Ok(Ok(bytes)) => Ok(bytes),
         Ok(Err(error)) if is_over_the_size_cap(&error) => Err(http::StatusCode::PAYLOAD_TOO_LARGE),
