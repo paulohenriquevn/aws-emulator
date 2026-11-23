@@ -794,3 +794,51 @@ fn target_group_arn(deployed: &Deployment) -> String {
         .cloned()
         .expect("the fixture created the group")
 }
+
+/// fork: a load balancer serves the browsers of any site, as an Application Load Balancer
+/// does: CORS is the application's to answer, and the browser enforces it. A request a
+/// browser sends from another site, and the preflight it sends first, reach the listener's
+/// rules on every addressing, where the front door refuses them for the emulator's own API.
+#[tokio::test]
+async fn a_load_balancer_answers_a_browser_from_another_site() {
+    let deployed = deployment().await;
+    let prefixed = format!("/_aws/elasticloadbalancing/{}/a", deployed.dns_name);
+    let addressings: Vec<(&str, &str, &str)> = vec![
+        ("the published DNS name", deployed.dns_name.as_str(), "/a"),
+        ("the reserved prefix and the DNS name", EMULATOR_HOST, prefixed.as_str()),
+    ];
+    let browsers: &[(&str, &str, &[(&str, &str)])] = &[
+        (
+            "a cross-site POST",
+            "POST",
+            &[("origin", "https://app.example.com"), ("sec-fetch-site", "cross-site")],
+        ),
+        (
+            "a same-site GET",
+            "GET",
+            &[("origin", "https://app.example.com"), ("sec-fetch-site", "same-site")],
+        ),
+        (
+            "a preflight",
+            "OPTIONS",
+            &[
+                ("origin", "https://app.example.com"),
+                ("access-control-request-method", "POST"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+        ),
+        ("an older browser's request with an Origin alone", "GET", &[("origin", "https://app.example.com")]),
+    ];
+    for (addressing, host, target) in &addressings {
+        for (browser, method, headers) in browsers {
+            let answered = send(&deployed.router, method, host, target, headers).await;
+            assert_eq!(
+                (answered.status, answered.body.as_str()),
+                (200, "a1"),
+                "case {browser} on {addressing}: expected the rule's own answer, got {} {:?}",
+                answered.status,
+                answered.body
+            );
+        }
+    }
+}
