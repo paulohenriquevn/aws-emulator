@@ -68,7 +68,9 @@ func joinConfiguration(registration nodeRegistration, apiServer, token, caHash s
 	args := fmt.Sprintf(`  - {name: provider-id, value: "aws:///%s/%s"}
   - {name: node-ip, value: %q}
   - {name: node-labels, value: %q}
-`, instance.Zone, instance.ID, instance.Address, strings.Join(pairs, ","))
+  - {name: image-credential-provider-config, value: %q}
+  - {name: image-credential-provider-bin-dir, value: %q}
+`, instance.Zone, instance.ID, instance.Address, strings.Join(pairs, ","), credentialProviderConfigPath, credentialProviderDir)
 	if len(registration.Taints) > 0 {
 		args += fmt.Sprintf("  - {name: register-with-taints, value: %q}\n", strings.Join(registration.Taints, ","))
 	}
@@ -130,7 +132,10 @@ func (p *provisioner) reconcileNodes(ctx context.Context, region, name string) e
 	var failures []string
 	for _, instance := range instances {
 		wanted[instance.ID] = true
-		if _, ok := containers[instance.ID]; ok {
+		if container, ok := containers[instance.ID]; ok {
+			if err := p.ensureImagePulls(ctx, region, name, container); err != nil {
+				failures = append(failures, err.Error())
+			}
 			continue
 		}
 		if err := p.joinInstance(ctx, region, name, instance); err != nil {
@@ -255,6 +260,14 @@ func (p *provisioner) join(ctx context.Context, region, name, container, control
 	if err != nil {
 		return err
 	}
+	// The kubelet starts with the image credential provider, so its files are there first.
+	pulls, err := p.nodePulls(ctx, region, name, container)
+	if err != nil {
+		return err
+	}
+	if err := configureImagePulls(ctx, container, pulls); err != nil {
+		return err
+	}
 	config := joinConfiguration(registration, fmt.Sprintf("%s:%d", endpoint, apiServerPort), match[1], match[2])
 	if err := dockerWithInput(ctx, config, "exec", "-i", container, "sh", "-c", "cat > /kind/join.yaml"); err != nil {
 		return err
@@ -262,6 +275,7 @@ func (p *provisioner) join(ctx context.Context, region, name, container, control
 	if _, err := docker(ctx, "exec", container, "kubeadm", "join", "--config", "/kind/join.yaml", "--skip-phases=preflight"); err != nil {
 		return fmt.Errorf("kubeadm join of %s: %w", registration.Instance.ID, err)
 	}
+	p.pullsConfigured[container] = true
 	return nil
 }
 
@@ -278,6 +292,7 @@ func (p *provisioner) removeNode(ctx context.Context, region, name, container st
 		return fmt.Errorf("deleting node %s: %w", hostname, err)
 	}
 	p.log.Info("removed a node whose instance is gone", "cluster", name, "node", hostname)
+	delete(p.pullsConfigured, container)
 	_, err = docker(ctx, "rm", "-f", container)
 	return err
 }

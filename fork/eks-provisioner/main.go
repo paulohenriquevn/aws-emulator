@@ -55,6 +55,11 @@ type provisioner struct {
 	addonsAt    map[string]time.Time
 	// webhookImage is the pod identity webhook image every cluster runs.
 	webhookImage string
+	// registryHost is the host:port of the emulator's ECR registry that nodes pull from:
+	// the host of AWS_ENDPOINT_URL, which they reach as pods do.
+	registryHost string
+	// pullsConfigured are the node containers this run configured to pull from it.
+	pullsConfigured map[string]bool
 }
 
 func main() {
@@ -111,20 +116,22 @@ func run(regions, stateDir, listen, stsAliases, systemRoots, webhookImage string
 		return fmt.Errorf("--listen %q names no port", listen)
 	}
 	p := &provisioner{
-		regions:      splitList(regions),
-		stateDir:     stateDir,
-		listenPort:   port,
-		emulator:     emu,
-		webhook:      hook,
-		kind:         cluster.NewProvider(cluster.ProviderWithDocker(), cluster.ProviderWithLogger(log.NoopLogger{})),
-		awsConfig:    awsConfig,
-		log:          logger,
-		retryAfter:   map[string]time.Time{},
-		failures:     map[string]int{},
-		trust:        trust,
-		podEndpoint:  strings.TrimRight(endpoint, "/"),
-		addonsAt:     map[string]time.Time{},
-		webhookImage: webhookImage,
+		regions:         splitList(regions),
+		stateDir:        stateDir,
+		listenPort:      port,
+		emulator:        emu,
+		webhook:         hook,
+		kind:            cluster.NewProvider(cluster.ProviderWithDocker(), cluster.ProviderWithLogger(log.NoopLogger{})),
+		awsConfig:       awsConfig,
+		log:             logger,
+		retryAfter:      map[string]time.Time{},
+		failures:        map[string]int{},
+		trust:           trust,
+		podEndpoint:     strings.TrimRight(endpoint, "/"),
+		addonsAt:        map[string]time.Time{},
+		webhookImage:    webhookImage,
+		registryHost:    emu.endpoint.Host,
+		pullsConfigured: map[string]bool{},
 	}
 	served := make(chan error, 1)
 	go func() { served <- p.listen(ctx, listen, logger) }()
@@ -225,6 +232,11 @@ func (p *provisioner) registered(described *ekstypes.Cluster) bool {
 func (p *provisioner) teardown(ctx context.Context, region, name string) error {
 	p.log.Info("deleting the control plane of a cluster that is gone", "cluster", name, "region", region)
 	delete(p.addonsAt, region+"/"+name)
+	for container := range p.pullsConfigured {
+		if strings.HasPrefix(container, kindName(region, name)+"-") {
+			delete(p.pullsConfigured, container)
+		}
+	}
 	if err := p.kind.Delete(kindName(region, name), filepath.Join(p.clusterDir(region, name), "kubeconfig")); err != nil {
 		return fmt.Errorf("kind delete cluster %s: %w", kindName(region, name), err)
 	}

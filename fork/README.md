@@ -266,6 +266,29 @@ new pods mount. The public roots are the host's bundle (`--system-roots`, by def
 `SSL_CERT_FILE` or the distribution's file); a pod that trusts roots of its own besides those
 sets `SSL_CERT_FILE` itself.
 
+Nodes pull from the emulator's ECR the way an Amazon EKS node pulls from ECR, with no
+`imagePullSecret` in the pod. The registry host is the host of `AWS_ENDPOINT_URL`
+(`172.29.0.1:9597` on the staging host), so a pod names its image
+`<that host>/<repository>@sha256:...`, not the `repositoryUri` ECR reports (`localhost:9597/...`,
+which on a node is the node itself). On every node it joins, and once per run on every node
+that joined before, the provisioner writes:
+
+| File on the node | What it does |
+|---|---|
+| `/etc/containerd/certs.d/<host>/hosts.toml` and `ca.crt` | containerd trusts the emulator's CA for the registry host. containerd 2 in kind's node images reads this directory by default. |
+| `/etc/eks/image-credential-provider/config.yaml` | The kubelet's `CredentialProviderConfig`: the provider `ecr-credential-provider` for images of the registry host, cached 10 minutes. |
+| `/etc/eks/image-credential-provider/ecr-credential-provider` | The provider, a script that sends the kubelet's `CredentialProviderRequest` to the provisioner at `/registry-credentials/{region}/{cluster}`, on the gateway of the node's network and the `--listen` port, with the kubelet's client certificate. |
+
+The kubelet starts with `--image-credential-provider-config` and
+`--image-credential-provider-bin-dir` from the node's JoinConfiguration; a node that joined
+without them gets them in `kubeadm-flags.env`, and its kubelet is restarted once. The
+provisioner answers only a client certificate the cluster's CA signed for a `system:node:`
+user in `system:nodes`, so a pod cannot ask. Each answer carries a token ECR
+`GetAuthorizationToken` has just issued to the provisioner's principal, as the user `AWS` and
+its password. The kubelet keeps it for 10 minutes, or less when the token expires sooner, and
+asks again after that, so an expired token is never used, and a token the emulator forgot
+across a restart stops being used within 10 minutes.
+
 Pods reach the emulator at `AWS_ENDPOINT_URL` through their node and the VPC's gateway, so it
 must be an address the VPC networks route to (on the staging host, `172.29.0.1`, with the
 firewall admitting `10.0.0.0/8`).
@@ -273,7 +296,8 @@ firewall admitting `10.0.0.0/8`).
 `fork/eks-provisioner/e2e.sh <emulator> <provisioner>` creates a cluster and a node group with
 the AWS CLI, waits for them to turn `ACTIVE`, lists the instances as Ready nodes with a
 kubeconfig from `aws eks update-kubeconfig`, runs `aws sts get-caller-identity` in a pod whose
-service account names an IRSA role and that sets no AWS variable, checks a role with no access
+service account names an IRSA role and that sets no AWS variable, copies an image into the
+emulator's ECR with crane and runs it in a pod with no `imagePullSecret`, checks a role with no access
 entry is refused, and deletes everything. A provisioner tears down only the kind clusters it
 keeps a state directory for, so the script runs beside another emulator and provisioner on the
 same host with `E2E_PORT` and `E2E_WEBHOOK_PORT` set to free ports.
@@ -287,6 +311,8 @@ Limits:
   control plane is a Node of the cluster too, tainted `NoSchedule`.
 - The pod identity webhook gets no EKS Pod Identity associations, and no EKS Pod Identity
   Agent runs: a pod gets IRSA, not Pod Identity.
+- A node pulls with a token issued to the provisioner's principal, not to the node role, so
+  the node role's ECR permissions are not what decides the pull.
 - A variable a pod takes from `envFrom` is not seen: a pod that sets `AWS_ENDPOINT_URL` only
   through a ConfigMap or a Secret gets the injected one, which takes precedence.
 - Pods take addresses from `100.64.0.0/16`, not from the VPC: kind's CNI is not the Amazon

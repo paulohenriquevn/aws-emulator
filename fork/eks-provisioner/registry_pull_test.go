@@ -321,7 +321,9 @@ func credentialsProvisioner(t *testing.T, ecrURL string, clusterCA []byte) *prov
 		awsConfig: aws.Config{
 			Region:       "us-east-1",
 			BaseEndpoint: aws.String(ecrURL),
-			Credentials:  aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) { return aws.Credentials{AccessKeyID: "AKID", SecretAccessKey: "secret"}, nil }),
+			Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+				return aws.Credentials{AccessKeyID: "AKID", SecretAccessKey: "secret"}, nil
+			}),
 		},
 	}
 	spec := clusterSpec{StateDir: p.clusterDir("us-east-1", "core")}
