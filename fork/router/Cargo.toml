@@ -57,6 +57,7 @@ service-com-amazonaws-pricing-awspricelistservice = { workspace = true }
 service-com-amazonaws-eksauth-eksauthfrontend = { workspace = true }
 
 [dev-dependencies]
+axum = "0.8"
 rustls = { workspace = true }
 serde_json = { workspace = true }
 ring = "0.17"
