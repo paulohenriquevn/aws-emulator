@@ -265,18 +265,22 @@ func (p *provisioner) bindNamespaced(ctx context.Context, region, cluster, polic
 	return bindNamespacedPolicy(ctx, clientset, policy, namespace)
 }
 
-// listen serves the token webhook, the endpoint injection webhook and /healthz until
+// listen serves the token webhook, the endpoint injection webhook, the nodes' registry
+// credentials and /healthz until
 // ctx ends.
 func (p *provisioner) listen(ctx context.Context, address string, log *slog.Logger) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/authenticate/", p.serveTokenReviews)
 	mux.HandleFunc("/mutate/", p.servePodMutations)
+	mux.HandleFunc("/registry-credentials/", p.serveRegistryCredentials)
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.Write([]byte("ok\n")) })
 	server := &http.Server{
 		Addr:              address,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		TLSConfig:         &tls.Config{GetCertificate: p.webhook.certificateFor, MinVersion: tls.VersionTLS12},
+		// A node's credential provider presents its kubelet's client certificate, which
+		// /registry-credentials/ verifies against the cluster's CA; the API servers present none.
+		TLSConfig: &tls.Config{GetCertificate: p.webhook.certificateFor, ClientAuth: tls.RequestClientCert, MinVersion: tls.VersionTLS12},
 	}
 	go func() {
 		<-ctx.Done()

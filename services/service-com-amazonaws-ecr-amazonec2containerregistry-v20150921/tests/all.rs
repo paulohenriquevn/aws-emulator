@@ -99,6 +99,8 @@ mod registry_resource_reads;
 mod registry_scanning_configuration;
 #[path = "all/registry_v2_pull.rs"]
 mod registry_v2_pull;
+#[path = "all/registry_v2_push.rs"]
+mod registry_v2_push;
 #[path = "all/repository_access_authorization.rs"]
 mod repository_access_authorization;
 #[path = "all/repository_creation_template_encryption.rs"]

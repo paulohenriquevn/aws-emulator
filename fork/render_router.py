@@ -82,6 +82,8 @@ tracing-subscriber = {{ workspace = true }}
 {deps}
 
 [dev-dependencies]
+# The request body cap test drives read_production_body with an axum body.
+axum = "0.8"
 rustls = {{ workspace = true }}
 serde_json = {{ workspace = true }}
 ring = "0.17"

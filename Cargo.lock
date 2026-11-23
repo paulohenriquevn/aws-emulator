@@ -453,6 +453,7 @@ dependencies = [
  "aws-emulator-smithy-server-runtime",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
+ "axum 0.8.9",
  "bytes",
  "http",
  "ring",

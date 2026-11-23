@@ -15,7 +15,10 @@
 #      variable of its own, is that role for `aws sts get-caller-identity`: the pod
 #      identity webhook gives it the role and the token, and the provisioner's webhook
 #      the emulator's endpoint and CA; a kube-system pod gets no endpoint;
-#   5. a principal with no access entry is refused, and deleting the cluster deletes its
+#   5. an image copied into the emulator's ECR runs in a pod that names it at the emulator's
+#      address and has no imagePullSecret: the node trusts the emulator's CA for the
+#      registry and its kubelet gets the registry's token from the provisioner;
+#   6. a principal with no access entry is refused, and deleting the cluster deletes its
 #      kind cluster.
 #
 # Usage: fork/eks-provisioner/e2e.sh <emulator-binary> <provisioner-binary>
@@ -40,6 +43,10 @@ EMULATOR_CIDR=172.30.0.0/16
 GATEWAY=172.30.0.1
 VPC_CIDR=10.42.0.0/16
 AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.37.8
+# crane copies the probe image into the emulator's ECR, and is that image too: it comes from
+# GCR, which does not throttle GitHub's runners as ECR Public does, and its largest layer is
+# under the emulator's default 16 MiB request body cap.
+CRANE_IMAGE=gcr.io/go-containerregistry/crane:v0.20.3
 
 say() { printf '[e2e] %s\n' "$*"; }
 # A failure prints the end of the provisioner's and the emulator's logs: on a CI runner
@@ -157,7 +164,39 @@ system_env=$(kubectl -n kube-system get pods -l app=pod-identity-webhook -o json
 [[ $system_env != *AWS_ENDPOINT_URL* ]] || fail "a kube-system pod got the emulator's endpoint"
 say "kube-system pods keep their own environment"
 
-# --- 5. Access entries decide, and deletion tears down -------------------------------------
+# --- 5. An image from the emulator's ECR, with no imagePullSecret --------------------------
+# The pod names the image at the address pods reach the emulator at, AWS_ENDPOINT_URL's host,
+# which is also the registry host the provisioner configures on every node.
+REGISTRY=${AWS_ENDPOINT_URL#https://}
+aws ecr create-repository --repository-name e2e/pull-probe >>"$LOG"
+cat "${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}" "$AWS_CA_BUNDLE" >"$WORK/registry-roots.pem"
+mkdir -p "$WORK/docker-config"
+(umask 077 && aws ecr get-authorization-token --query 'authorizationData[0].authorizationToken' --output text |
+  jq -R --arg host "$REGISTRY" '{auths: {($host): {auth: .}}}' >"$WORK/docker-config/config.json")
+docker run --rm --network host --user "$(id -u):$(id -g)" -v "$WORK/registry-roots.pem:/roots.pem:ro" -v "$WORK/docker-config:/docker-config:ro" \
+  -e SSL_CERT_FILE=/roots.pem -e DOCKER_CONFIG=/docker-config "$CRANE_IMAGE" \
+  copy --platform linux/amd64 "$CRANE_IMAGE" "$REGISTRY/e2e/pull-probe:e2e" >>"$LOG" 2>&1 ||
+  fail "copying $CRANE_IMAGE into the emulator's ECR failed; see $LOG"
+kubectl create namespace pull >>"$LOG"
+kubectl apply -f - >>"$LOG" <<POD
+apiVersion: v1
+kind: Pod
+metadata: {name: pull-probe, namespace: pull}
+spec:
+  restartPolicy: Never
+  containers:
+  - name: probe
+    image: $REGISTRY/e2e/pull-probe:e2e
+    args: [version]
+POD
+kubectl -n pull wait pod pull-probe --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s >>"$LOG" 2>&1 ||
+  { kubectl -n pull describe pod pull-probe; fail "the pod did not run the image from the emulator's ECR"; }
+[[ $(kubectl -n pull get pod pull-probe -o jsonpath='{.spec.imagePullSecrets}') == "" ]] || fail "the pull probe has an imagePullSecret"
+expected=$(docker run --rm "$CRANE_IMAGE" version)
+[[ $(kubectl -n pull logs pull-probe) == "$expected" ]] || fail "the pull probe printed $(kubectl -n pull logs pull-probe), not $expected"
+say "a pod with no imagePullSecret runs $REGISTRY/e2e/pull-probe:e2e"
+
+# --- 6. Access entries decide, and deletion tears down -------------------------------------
 OUTSIDER=$(aws iam create-role --role-name outsider --assume-role-policy-document \
   "$(jq -cn '{Version:"2012-10-17",Statement:[{Effect:"Allow",Principal:{AWS:"arn:aws:iam::000000000000:root"},Action:"sts:AssumeRole"}]}')" --query Role.Arn --output text)
 read -r key secret session < <(aws sts assume-role --role-arn "$OUTSIDER" --role-session-name e2e \
