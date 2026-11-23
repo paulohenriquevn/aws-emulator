@@ -119,6 +119,11 @@ jobs:
           unsigned_query_calls
           target_forwarding
 
+      - name: Docker push to the ECR registry endpoint, and the request body cap
+        run: |
+          cargo test -p service-com-amazonaws-ecr-amazonec2containerregistry-v20150921 --test all registry_v2
+          cargo test -p aws-emulator-fork-router --test request_body_limit
+
       - name: RDS for PostgreSQL on real PostgreSQL containers
         run: cargo test -p service-com-amazonaws-rds-amazonrdsv19 --test all postgres_container -- --ignored --test-threads=1
 

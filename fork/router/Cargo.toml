@@ -57,6 +57,7 @@ service-com-amazonaws-pricing-awspricelistservice = { workspace = true }
 service-com-amazonaws-eksauth-eksauthfrontend = { workspace = true }
 
 [dev-dependencies]
+# The request body cap test drives read_production_body with an axum body.
 axum = "0.8"
 rustls = { workspace = true }
 serde_json = { workspace = true }
