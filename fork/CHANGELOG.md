@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Fixed
+- An Application Load Balancer answers a request a browser sends from another site, and its CORS preflight, from its listener rules, as on AWS. The front door refused them with 403 `AccessDenied`, so a single-page app could not call an API behind a load balancer on another host (#17)
+
 ## [0.3.0] - 2026-11-23
 
 ### Added

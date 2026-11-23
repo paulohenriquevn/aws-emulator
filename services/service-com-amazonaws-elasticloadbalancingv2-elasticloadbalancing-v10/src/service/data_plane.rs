@@ -875,6 +875,12 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for DataPlane<Eng> {
         // credential: this plane serves the request however it arrived.
         Some(&[])
     }
+
+    fn serves_browsers_from_any_site(&self) -> bool {
+        // fork: an Application Load Balancer serves a browser on any site; the application
+        // behind it answers CORS, and the browser enforces it.
+        true
+    }
 }
 
 /// The listener the request reached: the one listening on the port the client addressed
