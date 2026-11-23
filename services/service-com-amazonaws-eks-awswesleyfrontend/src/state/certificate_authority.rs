@@ -214,6 +214,10 @@ pub struct CertificateAuthorityRecord {
     /// The Base64-encoded public certificate of this CA
     /// (`CertificateAuthority$data`), written once and read back unchanged.
     pub data: String,
+    /// fork: the key this CA signs with, issued with [`Self::data`]. No operation reports
+    /// it; the provisioner of an external control plane reads it through the fork's
+    /// control-plane route so the API server's certificates chain to `data`.
+    pub signing_key: SigningKeyPem,
     /// The `@idempotencyToken` of the request that appended this CA, so a retry
     /// of that request is absorbed and answered with this CA.
     pub client_request_token: Option<String>,
@@ -233,11 +237,12 @@ impl CertificateAuthorityRecord {
     /// so the two are one value rather than two copies.
     ///
     /// `None` when the certificate material does not issue
-    /// ([`mint_certificate_authority_data`]): a cluster whose root of trust could
+    /// ([`mint_certificate_authority`]): a cluster whose root of trust could
     /// not be issued has no certificate authority to report, so the create says
     /// so rather than seeding one with nothing in it.
     pub fn initial_for_cluster(cluster_arn: &str, now: SystemTime) -> Option<Self> {
         let not_after = now + CA_VALIDITY;
+        let material = mint_certificate_authority(now, not_after)?;
         Some(Self {
             id: derive_certificate_authority_id(cluster_arn, 0),
             created_at: now,
@@ -250,7 +255,8 @@ impl CertificateAuthorityRecord {
             not_before: now,
             not_after,
             rollback_available_until: None,
-            data: mint_certificate_authority_data(now, not_after)?,
+            data: material.data,
+            signing_key: material.signing_key,
             client_request_token: None,
             update_id: None,
         })
@@ -275,8 +281,10 @@ impl CertificateAuthorityRecord {
         update_id: String,
     ) -> Option<Self> {
         let not_after = now + CA_VALIDITY;
+        let material = mint_certificate_authority(now, not_after)?;
         Some(Self {
-            data: mint_certificate_authority_data(now, not_after)?,
+            data: material.data,
+            signing_key: material.signing_key,
             id: derive_certificate_authority_id(cluster_arn, seq),
             created_at: now,
             created_by: CA_BY_CUSTOMER.to_string(),

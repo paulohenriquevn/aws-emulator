@@ -1,0 +1,18 @@
+[package]
+name = "aws-emulator-fork-eks-control-plane"
+description = "Hands an EKS cluster's control plane to a provisioner outside the emulator and records the API server it provisioned."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bytes = { workspace = true }
+engine = { workspace = true }
+emulator-server = { workspace = true }
+http = { workspace = true }
+serde_json = { workspace = true }
+service-com-amazonaws-eks-awswesleyfrontend = { workspace = true }
+
+[lints]
+workspace = true
