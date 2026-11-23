@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
 ### Added
 - The ECR registry endpoint accepts `docker push`: blob upload sessions (`POST`, chunked `PATCH`, `PUT` with digest check, monolithic `POST ?digest=`, status and cancel), and `PUT` of Docker schema 2 and OCI manifests and indexes, which checks that referenced blobs exist and honours tag immutability. A pushed image is listed by `ListImages` and `DescribeImages` and pulls back through the registry endpoint (#19)
 - A push to a repository that does not exist creates it from the most specific repository creation template whose `appliedFor` includes `CREATE_ON_PUSH`, with the template's settings, as on ECR; without a matching template the push is refused with `NAME_UNKNOWN` (#19)
@@ -94,7 +96,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - An RDS instance or cluster created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves that port, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
 - The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)
 
-[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.1.0...v0.2.0
