@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
+
 ### Added
 - eks-provisioner: `--pod-identity-webhook-image` (or `POD_IDENTITY_WEBHOOK_IMAGE`) runs a copy of the pod identity webhook image, pinned by digest, on a host whose address ECR Public throttles (#15)
 - `EMULATOR_EKS_CONTROL_PLANE=external` leaves an EKS cluster `CREATING` until a provisioner outside the emulator registers its API server with `PUT /_fork/eks/clusters/{name}/control-plane`, which turns it `ACTIVE` with that endpoint; `GET` on the same route answers the cluster's issuer, version and certificate authority, signing key included (#15)
@@ -81,6 +83,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - An RDS instance or cluster created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves that port, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
 - The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)
 
-[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/paulohenriquevn/aws-emulator/releases/tag/v0.1.0
