@@ -264,8 +264,12 @@ impl<Eng> PutImage<Eng> {
     /// Store the pushed manifest and its tag, and answer both the response the push gives
     /// its caller and the image action it performed.
     ///
-    /// Everything this operation writes happens here, under the store's lock; the caller
-    /// publishes the action once that lock is gone.
+    /// The write itself is the store's own
+    /// ([`store_pushed_image`](crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State::store_pushed_image)),
+    /// shared with the registry endpoint's manifest `PUT`, so a push through either surface
+    /// stores one image record the same way. What is decided here is how each refusal is
+    /// worded in this operation's modelled errors. The caller publishes the action once the
+    /// store's lock is released.
     fn store_pushed_image(
         state: &::engine::ServiceState<
             crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
@@ -275,218 +279,131 @@ impl<Eng> PutImage<Eng> {
         now: ::std::time::SystemTime,
         planned_signings: Vec<crate::state::signing::ImageSigning>,
     ) -> Result<(PutImageOutput, crate::state::image_events::ImageAction), PutImageError> {
-        let mut store = state.lock();
-
-        // The repository the push addresses has to exist before anything is charged
-        // against the registry's capacity: a push to a repository the registry does not
-        // hold is that refusal, not a capacity one. The same resolved record answers what
-        // the push would COST: the per-record caps below each bound ONE dimension, while
-        // this is the registry-wide budget the bytes of every stored manifest and every
-        // in-flight upload share, so a client cannot hold the product of those caps in
-        // this process's memory. A manifest the repository already holds costs nothing
-        // more, so only a new one is charged, and the push is refused before any byte of
-        // it is stored. See [`crate::state::MAX_REGISTRY_CALLER_BYTES`].
-        let manifest_bytes = {
-            let repo = store
-                .repository(&input.repository_name)
-                .map_err(fault_error)?;
-            if repo.images.contains_key(&digest) {
-                0
-            } else {
-                input.image_manifest.len()
-            }
+        let push = crate::state::ImagePush {
+            repository_name: &input.repository_name,
+            manifest: &input.image_manifest,
+            media_type: input.image_manifest_media_type.as_deref(),
+            tag: input.image_tag.as_deref(),
+            digest: &digest,
         };
-        if !store.has_byte_budget_for(manifest_bytes) {
-            return Err(
-                PutImageErrorModeled::LimitExceededException(LimitExceededException {
-                    message: Some(format!(
-                        "this registry holds at most {} bytes of stored image manifests \
-                         and in-flight layer uploads together",
-                        crate::state::MAX_REGISTRY_CALLER_BYTES
-                    )),
-                })
-                .into(),
-            );
-        }
-
-        // The copies this push starts are decided by the registry's replication
-        // configuration, which spans every repository, so the rules are read before one
-        // repository is borrowed for writing.
-        let planned_replications = store.planned_replications(&input.repository_name, now);
-
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
-
-        // A manifest is only pushable once every blob it references is in the
-        // repository: "when an image is pushed and all new image layers have been
-        // uploaded, the PutImage API is called once". A manifest naming a blob the
-        // repository does not hold is refused with `LayersNotFoundException` ("the
-        // specified layers could not be found, or the specified layer is not valid for
-        // this repository") and nothing is stored, so the repository never advertises an
-        // image that cannot be pulled. The refusal names the digests that resolved to no
-        // blob, the repository and the registry.
-        let missing = repo.missing_layers(&input.image_manifest);
-        if !missing.is_empty() {
-            return Err(
-                PutImageErrorModeled::LayersNotFoundException(LayersNotFoundException {
-                    message: Some(format!(
-                        "Layers with digests '[{}]' required for pushing image into \
-                         repository with name '{}' in the registry with id '{}' do not exist",
-                        missing.join(","),
-                        repo.name,
-                        repo.registry_id
-                    )),
-                })
-                .into(),
-            );
-        }
-
-        match input.image_tag.as_deref() {
-            // The very same manifest under the very same tag is already in the
-            // repository, so there is nothing to push.
-            Some(tag) if repo.digest_of_tag(tag) == Some(&digest) => {
-                return Err(PutImageErrorModeled::ImageAlreadyExistsException(
-                    ImageAlreadyExistsException {
-                        message: Some(format!(
-                            "Image with digest '{digest}' and tag '{tag}' already exists \
-                             in the repository with name '{}' in registry with id '{}'",
-                            repo.name, repo.registry_id
-                        )),
-                    },
-                )
-                .into());
-            }
-            // The tag points at another manifest, and this repository does not allow
-            // that tag to be overwritten.
-            Some(tag) if repo.digest_of_tag(tag).is_some() && !repo.tag_is_mutable(tag) => {
-                return Err(PutImageErrorModeled::ImageTagAlreadyExistsException(
-                    ImageTagAlreadyExistsException {
-                        message: Some(format!(
-                            "The image tag '{tag}' already exists in the '{}' repository \
-                             and cannot be overwritten because the tag is immutable.",
-                            repo.name
-                        )),
-                    },
-                )
-                .into());
-            }
-            // An untagged push of a manifest the repository already holds adds nothing.
-            None if repo.images.contains_key(&digest) => {
-                return Err(PutImageErrorModeled::ImageAlreadyExistsException(
-                    ImageAlreadyExistsException {
-                        message: Some(format!(
-                            "Image with digest '{digest}' already exists in the \
-                             repository with name '{}' in registry with id '{}'",
-                            repo.name, repo.registry_id
-                        )),
-                    },
-                )
-                .into());
-            }
-            _ => {}
-        }
-
-        // The store is bounded: past its caps a push is refused rather than storing
-        // another manifest or another tag. See [`crate::state::MAX_REPOSITORIES`].
-        if !repo.images.contains_key(&digest)
-            && repo.images.len() >= crate::state::MAX_IMAGES_PER_REPOSITORY
-        {
-            return Err(
-                PutImageErrorModeled::LimitExceededException(LimitExceededException {
-                    message: Some(format!(
-                        "the repository with name '{}' already holds the maximum of {} images",
-                        repo.name,
-                        crate::state::MAX_IMAGES_PER_REPOSITORY
-                    )),
-                })
-                .into(),
-            );
-        }
-        let new_tag = input
-            .image_tag
-            .as_deref()
-            .is_some_and(|tag| repo.digest_of_tag(tag).is_none());
-        if new_tag && repo.tag_index.len() >= crate::state::MAX_TAGS_PER_REPOSITORY {
-            return Err(
-                PutImageErrorModeled::LimitExceededException(LimitExceededException {
-                    message: Some(format!(
-                        "the repository with name '{}' already holds the maximum of {} image tags",
-                        repo.name,
-                        crate::state::MAX_TAGS_PER_REPOSITORY
-                    )),
-                })
-                .into(),
-            );
-        }
-
-        // The manifest is stored once per digest: re-pushing the same content under a
-        // new tag keeps the record, and therefore the instant it was first pushed. What
-        // the manifest states about itself — its media type, the artifact type its config
-        // descriptor names and the content it references — is read out of the document
-        // here, once, so no read re-parses it. The copies the registry's replication
-        // configuration asks for are started by the push that STORES the image, which is
-        // why they are set here and not on a later push of the same content: replication
-        // copies an image as it arrives. The signing jobs the registry's signing
-        // configuration asks for are set with them, for the same reason: a signing job
-        // signs an image as it arrives.
-        repo.images.entry(digest.clone()).or_insert_with(|| {
-            let mut stored = crate::state::ImageRecord::pushed(
-                digest.clone(),
-                input.image_manifest.clone(),
-                input
-                    .image_manifest_media_type
-                    .clone()
-                    .or_else(|| crate::state::manifest_media_type(&input.image_manifest)),
-                now,
-            );
-            stored.replications = planned_replications;
-            stored.signings = planned_signings;
-            stored
-        });
-
-        // Attaching the tag detaches it from whatever held it: the image it was taken
-        // from stays addressable by its digest, now untagged.
-        if let Some(tag) = input.image_tag.as_deref() {
-            repo.move_tag(tag, &digest);
-        }
-
-        // The repository's image set changed, and a manifest list's size is a statement
-        // about the images stored beside it, so every image's reported size is recomputed
-        // here rather than frozen when its own manifest arrived.
-        repo.refresh_image_sizes();
-
-        let Some(stored) = repo.images.get(&digest) else {
-            return Err(PutImageErrorModeled::ServerException(ServerException {
-                message: Some(format!("the image '{digest}' was not stored")),
-            })
-            .into());
-        };
+        let stored = state
+            .lock()
+            .store_pushed_image(push, now, planned_signings)
+            .map_err(refusal_error)?;
 
         let output = PutImageOutput {
             image: Some(Image {
-                registry_id: Some(repo.registry_id.clone()),
-                repository_name: Some(repo.name.clone()),
+                registry_id: Some(stored.registry_id),
+                repository_name: Some(stored.repository_name),
                 image_id: Some(ImageIdentifier {
-                    image_digest: Some(stored.digest.clone()),
+                    image_digest: Some(stored.digest),
                     image_tag: input.image_tag.clone(),
                 }),
-                image_manifest: Some(stored.manifest.clone()),
-                image_manifest_media_type: stored.manifest_media_type.clone(),
+                image_manifest: Some(stored.manifest),
+                image_manifest_media_type: stored.manifest_media_type,
                 // The byte length of the manifest this response carries, so a client that
                 // streams or verifies the document knows how much of it there is.
-                image_manifest_size: Some(stored.manifest_size()),
+                image_manifest_size: Some(stored.manifest_size),
             }),
         };
-        // The action this push performed, built from the record above — what the caller
-        // publishes to EventBridge once this lock is released.
-        let pushed = crate::state::image_events::ImageAction {
-            repository_name: repo.name.clone(),
-            action_type: crate::state::image_events::ACTION_TYPE_PUSH,
-            image_digest: digest.clone(),
-            image_tag: input.image_tag.clone(),
-            at: now,
-        };
-        Ok((output, pushed))
+        Ok((output, stored.action))
     }
+}
+
+/// The modelled error a refused push answers with, in ECR's wording for each condition.
+fn refusal_error(refusal: crate::state::ImagePushRefusal) -> PutImageError {
+    use crate::state::ImagePushRefusal as Refusal;
+    let modeled = match refusal {
+        Refusal::RepositoryNotFound(message) => {
+            PutImageErrorModeled::RepositoryNotFoundException(RepositoryNotFoundException {
+                message: Some(message),
+            })
+        }
+        // The registry-wide budget the bytes of every stored manifest and every in-flight
+        // upload share. See [`crate::state::MAX_REGISTRY_CALLER_BYTES`].
+        Refusal::ByteBudgetExhausted => {
+            PutImageErrorModeled::LimitExceededException(LimitExceededException {
+                message: Some(format!(
+                    "this registry holds at most {} bytes of stored image manifests \
+                     and in-flight layer uploads together",
+                    crate::state::MAX_REGISTRY_CALLER_BYTES
+                )),
+            })
+        }
+        // A manifest is only pushable once every blob it references is in the repository:
+        // "when an image is pushed and all new image layers have been uploaded, the PutImage
+        // API is called once". The refusal names the digests that resolved to no blob, the
+        // repository and the registry.
+        Refusal::LayersNotFound {
+            missing,
+            repository_name,
+            registry_id,
+        } => PutImageErrorModeled::LayersNotFoundException(LayersNotFoundException {
+            message: Some(format!(
+                "Layers with digests '[{}]' required for pushing image into repository with \
+                 name '{repository_name}' in the registry with id '{registry_id}' do not exist",
+                missing.join(","),
+            )),
+        }),
+        // The very same manifest under the very same tag is already in the repository.
+        Refusal::ImageAlreadyExists {
+            digest,
+            tag: Some(tag),
+            repository_name,
+            registry_id,
+        } => PutImageErrorModeled::ImageAlreadyExistsException(ImageAlreadyExistsException {
+            message: Some(format!(
+                "Image with digest '{digest}' and tag '{tag}' already exists in the repository \
+                 with name '{repository_name}' in registry with id '{registry_id}'"
+            )),
+        }),
+        // An untagged push of a manifest the repository already holds adds nothing.
+        Refusal::ImageAlreadyExists {
+            digest,
+            tag: None,
+            repository_name,
+            registry_id,
+        } => PutImageErrorModeled::ImageAlreadyExistsException(ImageAlreadyExistsException {
+            message: Some(format!(
+                "Image with digest '{digest}' already exists in the repository with name \
+                 '{repository_name}' in registry with id '{registry_id}'"
+            )),
+        }),
+        // The tag points at another manifest, and this repository does not allow that tag
+        // to be overwritten.
+        Refusal::TagImmutable {
+            tag,
+            repository_name,
+        } => PutImageErrorModeled::ImageTagAlreadyExistsException(
+            ImageTagAlreadyExistsException {
+                message: Some(format!(
+                    "The image tag '{tag}' already exists in the '{repository_name}' \
+                     repository and cannot be overwritten because the tag is immutable."
+                )),
+            },
+        ),
+        // The store is bounded. See [`crate::state::MAX_REPOSITORIES`].
+        Refusal::ImageCeilingReached { repository_name } => {
+            PutImageErrorModeled::LimitExceededException(LimitExceededException {
+                message: Some(format!(
+                    "the repository with name '{repository_name}' already holds the maximum \
+                     of {} images",
+                    crate::state::MAX_IMAGES_PER_REPOSITORY
+                )),
+            })
+        }
+        Refusal::TagCeilingReached { repository_name } => {
+            PutImageErrorModeled::LimitExceededException(LimitExceededException {
+                message: Some(format!(
+                    "the repository with name '{repository_name}' already holds the maximum \
+                     of {} image tags",
+                    crate::state::MAX_TAGS_PER_REPOSITORY
+                )),
+            })
+        }
+        Refusal::NotStored { digest } => PutImageErrorModeled::ServerException(ServerException {
+            message: Some(format!("the image '{digest}' was not stored")),
+        }),
+    };
+    modeled.into()
 }
