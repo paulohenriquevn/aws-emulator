@@ -53,6 +53,8 @@ type provisioner struct {
 	trust       trustBundle
 	podEndpoint string
 	addonsAt    map[string]time.Time
+	// webhookImage is the pod identity webhook image every cluster runs.
+	webhookImage string
 }
 
 func main() {
@@ -62,16 +64,17 @@ func main() {
 	interval := flag.Duration("interval", 5*time.Second, "time between two reconcile passes")
 	stsAliases := flag.String("sts-aliases", "", "comma-separated host:port names, besides AWS_ENDPOINT_URL's, that clients reach the same emulator by (localhost:9597 on the emulator's host); a token signed for one of them is accepted")
 	systemRoots := flag.String("system-roots", "", "PEM bundle of public roots that pods get with the emulator's CA (default: SSL_CERT_FILE, else the host's bundle)")
+	webhookImage := flag.String("pod-identity-webhook-image", envOr("POD_IDENTITY_WEBHOOK_IMAGE", defaultPodIdentityWebhookImage), "the amazon-eks-pod-identity-webhook image, pinned by digest; a copy of the default for a host ECR Public throttles")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	if err := run(*regions, *stateDir, *listen, *stsAliases, *systemRoots, *interval, logger); err != nil {
+	if err := run(*regions, *stateDir, *listen, *stsAliases, *systemRoots, *webhookImage, *interval, logger); err != nil {
 		logger.Error("eks-provisioner stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(regions, stateDir, listen, stsAliases, systemRoots string, interval time.Duration, logger *slog.Logger) error {
+func run(regions, stateDir, listen, stsAliases, systemRoots, webhookImage string, interval time.Duration, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -100,24 +103,28 @@ func run(regions, stateDir, listen, stsAliases, systemRoots string, interval tim
 	if err != nil {
 		return err
 	}
+	if err := checkWebhookImage(webhookImage); err != nil {
+		return err
+	}
 	_, port, found := strings.Cut(listen, ":")
 	if !found || port == "" {
 		return fmt.Errorf("--listen %q names no port", listen)
 	}
 	p := &provisioner{
-		regions:     splitList(regions),
-		stateDir:    stateDir,
-		listenPort:  port,
-		emulator:    emu,
-		webhook:     hook,
-		kind:        cluster.NewProvider(cluster.ProviderWithDocker(), cluster.ProviderWithLogger(log.NoopLogger{})),
-		awsConfig:   awsConfig,
-		log:         logger,
-		retryAfter:  map[string]time.Time{},
-		failures:    map[string]int{},
-		trust:       trust,
-		podEndpoint: strings.TrimRight(endpoint, "/"),
-		addonsAt:    map[string]time.Time{},
+		regions:      splitList(regions),
+		stateDir:     stateDir,
+		listenPort:   port,
+		emulator:     emu,
+		webhook:      hook,
+		kind:         cluster.NewProvider(cluster.ProviderWithDocker(), cluster.ProviderWithLogger(log.NoopLogger{})),
+		awsConfig:    awsConfig,
+		log:          logger,
+		retryAfter:   map[string]time.Time{},
+		failures:     map[string]int{},
+		trust:        trust,
+		podEndpoint:  strings.TrimRight(endpoint, "/"),
+		addonsAt:     map[string]time.Time{},
+		webhookImage: webhookImage,
 	}
 	served := make(chan error, 1)
 	go func() { served <- p.listen(ctx, listen, logger) }()

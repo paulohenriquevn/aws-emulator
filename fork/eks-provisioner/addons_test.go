@@ -18,13 +18,13 @@ import (
 )
 
 func TestThePodIdentityWebhookImageIsPinnedByVersionAndDigest(t *testing.T) {
-	if !regexp.MustCompile(`^public\.ecr\.aws/eks/amazon-eks-pod-identity-webhook:v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$`).MatchString(podIdentityWebhookImage) {
-		t.Fatalf("got %q", podIdentityWebhookImage)
+	if !regexp.MustCompile(`^public\.ecr\.aws/eks/amazon-eks-pod-identity-webhook:v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$`).MatchString(defaultPodIdentityWebhookImage) {
+		t.Fatalf("got %q", defaultPodIdentityWebhookImage)
 	}
 }
 
 func TestThePodIdentityWebhookRunsOnTheControlPlane(t *testing.T) {
-	spec := podIdentityWebhookDeployment("us-east-1").Spec.Template.Spec
+	spec := podIdentityWebhookDeployment("us-east-1", defaultPodIdentityWebhookImage).Spec.Template.Spec
 
 	if _, ok := spec.NodeSelector["node-role.kubernetes.io/control-plane"]; !ok {
 		t.Errorf("the webhook is not held to the control plane: %v", spec.NodeSelector)
@@ -41,7 +41,7 @@ func TestThePodIdentityWebhookRunsOnTheControlPlane(t *testing.T) {
 }
 
 func TestThePodIdentityWebhookInjectsTheSTSAudienceAndTheRegion(t *testing.T) {
-	command := strings.Join(podIdentityWebhookDeployment("us-east-1").Spec.Template.Spec.Containers[0].Command, " ")
+	command := strings.Join(podIdentityWebhookDeployment("us-east-1", defaultPodIdentityWebhookImage).Spec.Template.Spec.Containers[0].Command, " ")
 
 	for _, flag := range []string{"--in-cluster=false", "--token-audience=sts.amazonaws.com", "--aws-default-region=us-east-1", "--sts-regional-endpoint=true", "--annotation-prefix=eks.amazonaws.com"} {
 		if !strings.Contains(command, flag) {
@@ -237,5 +237,26 @@ func TestAWebhookWithNoPodSaysSo(t *testing.T) {
 
 	if !strings.Contains(state, "no pod") {
 		t.Errorf("got %q", state)
+	}
+}
+
+func TestThePodIdentityWebhookRunsTheImageItIsGiven(t *testing.T) {
+	image := "ghcr.io/example/amazon-eks-pod-identity-webhook:v0.6.19@sha256:" + strings.Repeat("a", 64)
+
+	containers := podIdentityWebhookDeployment("us-east-1", image).Spec.Template.Spec.Containers
+
+	if len(containers) != 1 || containers[0].Image != image {
+		t.Errorf("got %+v", containers)
+	}
+}
+
+func TestAWebhookImageNotPinnedByDigestIsRefused(t *testing.T) {
+	for _, image := range []string{"", "public.ecr.aws/eks/amazon-eks-pod-identity-webhook:v0.6.19", "ghcr.io/example/webhook@sha256:short"} {
+		if err := checkWebhookImage(image); err == nil {
+			t.Errorf("%q was accepted", image)
+		}
+	}
+	if err := checkWebhookImage(defaultPodIdentityWebhookImage); err != nil {
+		t.Errorf("the default image was refused: %v", err)
 	}
 }

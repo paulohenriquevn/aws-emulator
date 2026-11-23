@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,13 +32,15 @@ import (
 // provisioner installs in each kind cluster: amazon-eks-pod-identity-webhook (IRSA), and
 // the webhook that points the cluster's pods at the emulator.
 const (
-	// podIdentityWebhookImage is the webhook's v0.6.19 release, the image its README
+	// defaultPodIdentityWebhookImage is the webhook's v0.6.19 release, the image its README
 	// publishes on Amazon ECR Public, pinned by the digest of its multi-arch index.
-	podIdentityWebhookImage = "public.ecr.aws/eks/amazon-eks-pod-identity-webhook:v0.6.19@sha256:160ec19c2222016fa28db5e5269b233368ac788ed2d76479a2730cabff3cf693"
-	podIdentityWebhookName  = "pod-identity-webhook"
-	podIdentityNamespace    = "kube-system"
-	podIdentityCertSecret   = "pod-identity-webhook-cert"
-	endpointWebhookName     = "aws-emulator-endpoint"
+	// --pod-identity-webhook-image replaces it with a copy, for a host whose address ECR
+	// Public throttles.
+	defaultPodIdentityWebhookImage = "public.ecr.aws/eks/amazon-eks-pod-identity-webhook:v0.6.19@sha256:160ec19c2222016fa28db5e5269b233368ac788ed2d76479a2730cabff3cf693"
+	podIdentityWebhookName         = "pod-identity-webhook"
+	podIdentityNamespace           = "kube-system"
+	podIdentityCertSecret          = "pod-identity-webhook-cert"
+	endpointWebhookName            = "aws-emulator-endpoint"
 
 	managedByLabel = "app.kubernetes.io/managed-by"
 	managedBy      = "aws-emulator-eks-provisioner"
@@ -57,7 +60,7 @@ func objectMeta(name, namespace string) metav1.ObjectMeta {
 // podIdentityWebhookDeployment runs the webhook on the control-plane node, where Amazon
 // EKS runs it: it serves pods created before any node group has joined, and takes no
 // capacity from the nodes.
-func podIdentityWebhookDeployment(region string) *appsv1.Deployment {
+func podIdentityWebhookDeployment(region, image string) *appsv1.Deployment {
 	labels := map[string]string{"app": podIdentityWebhookName}
 	replicas := int32(1)
 	return &appsv1.Deployment{
@@ -75,7 +78,7 @@ func podIdentityWebhookDeployment(region string) *appsv1.Deployment {
 					Tolerations:        []corev1.Toleration{{Key: controlPlaneRole, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}},
 					Containers: []corev1.Container{{
 						Name:  podIdentityWebhookName,
-						Image: podIdentityWebhookImage,
+						Image: image,
 						Command: []string{
 							"/webhook",
 							// The webhook reads its certificate from files, and reloads it.
@@ -183,7 +186,7 @@ func podCreation() admissionregistrationv1.RuleWithOperations {
 
 // addonObjects is every object the add-ons are, in the order they are applied: the
 // webhook's own objects before the configuration that sends pods to it.
-func addonObjects(region, endpointURL string, webhookCA, servingCert, servingKey []byte) []runtime.Object {
+func addonObjects(region, endpointURL, webhookImage string, webhookCA, servingCert, servingKey []byte) []runtime.Object {
 	labels := map[string]string{"app": podIdentityWebhookName}
 	return []runtime.Object{
 		&corev1.ServiceAccount{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"}, ObjectMeta: objectMeta(podIdentityWebhookName, podIdentityNamespace)},
@@ -204,7 +207,7 @@ func addonObjects(region, endpointURL string, webhookCA, servingCert, servingKey
 			Type:       corev1.SecretTypeTLS,
 			Data:       map[string][]byte{corev1.TLSCertKey: servingCert, corev1.TLSPrivateKeyKey: servingKey},
 		},
-		podIdentityWebhookDeployment(region),
+		podIdentityWebhookDeployment(region, webhookImage),
 		&corev1.Service{
 			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 			ObjectMeta: objectMeta(podIdentityWebhookName, podIdentityNamespace),
@@ -263,7 +266,7 @@ func (p *provisioner) installAddons(ctx context.Context, region, name string, ga
 		return err
 	}
 	url := fmt.Sprintf("https://%s:%s/mutate/%s/%s", gateway, p.listenPort, region, name)
-	for _, object := range addonObjects(region, url, p.webhook.caPEM, cert, key) {
+	for _, object := range addonObjects(region, url, p.webhookImage, p.webhook.caPEM, cert, key) {
 		if err := apply(ctx, clientset, object); err != nil {
 			return fmt.Errorf("the add-ons of %s: %w", name, err)
 		}
@@ -377,4 +380,16 @@ func podsState(ctx context.Context, clientset kubernetes.Interface, namespace, s
 		states = append(states, state)
 	}
 	return strings.Join(states, "; ")
+}
+
+// pinnedImage is an image reference that names its manifest by digest.
+var pinnedImage = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
+
+// checkWebhookImage refuses a pod identity webhook image that is not pinned by digest:
+// a tag alone could change what every cluster runs.
+func checkWebhookImage(image string) error {
+	if !pinnedImage.MatchString(image) {
+		return fmt.Errorf("--pod-identity-webhook-image %q is not pinned by digest (name@sha256:<64 hex>)", image)
+	}
+	return nil
 }

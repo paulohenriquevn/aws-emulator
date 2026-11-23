@@ -246,6 +246,12 @@ pods created before any node has joined, and the cluster turns `ACTIVE` only onc
 available. Its serving certificate is signed by the provisioner's `webhook-ca.crt`, which the
 API server trusts already, and kept in the cluster's state directory.
 
+Its image comes from ECR Public. A host whose address ECR Public throttles (GitHub's shared
+runners get `429 Data limit exceeded`) runs a copy instead, with
+`--pod-identity-webhook-image` or `POD_IDENTITY_WEBHOOK_IMAGE`; the provisioner refuses a
+reference that is not pinned by digest. The fork's CI copies the image to GHCR under the same
+digest and runs that.
+
 The endpoint webhook leaves alone a pod with a container that sets `AWS_ENDPOINT_URL`, and a
 variable a container sets itself keeps its value. Its `failurePolicy` is `Fail`: while the
 provisioner is down a pod outside `kube-system` is refused, and its controller creates it

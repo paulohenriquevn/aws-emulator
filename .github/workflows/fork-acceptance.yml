@@ -287,6 +287,18 @@ jobs:
     if: ${{ !cancelled() && (needs.acceptance.result == 'success' || inputs.emulator-run-id) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      # The copy of the pod identity webhook image below.
+      packages: write
+    env:
+      # ECR Public answers the shared addresses of GitHub's runners with 429 "Data limit
+      # exceeded", so the clusters here run a copy of the webhook image on GHCR: the same
+      # index, under the same digest. The copy is made once, by the first run that ECR
+      # Public lets through.
+      WEBHOOK_SOURCE: public.ecr.aws/eks/amazon-eks-pod-identity-webhook:v0.6.19@sha256:160ec19c2222016fa28db5e5269b233368ac788ed2d76479a2730cabff3cf693
+      WEBHOOK_COPY: ghcr.io/${{ github.repository_owner }}/amazon-eks-pod-identity-webhook
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -294,6 +306,27 @@ jobs:
         with:
           go-version-file: fork/eks-provisioner/go.mod
           cache-dependency-path: fork/eks-provisioner/go.sum
+
+      - name: Copy the pod identity webhook image to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.2
+          crane auth login ghcr.io -u "$ACTOR" -p "$GH_TOKEN"
+          digest=${WEBHOOK_SOURCE#*@}
+          tag=${WEBHOOK_SOURCE#*:}; tag=${tag%@*}
+          if crane digest "$WEBHOOK_COPY@$digest" >/dev/null 2>&1; then
+            echo "$WEBHOOK_COPY@$digest is already there"
+          else
+            for attempt in 1 2 3 4 5 6; do
+              crane copy "$WEBHOOK_SOURCE" "$WEBHOOK_COPY:$tag" && break
+              [ "$attempt" = 6 ] && { echo "::error::ECR Public refused every copy of $WEBHOOK_SOURCE"; exit 1; }
+              sleep $((attempt * 30))
+            done
+          fi
+          test "$(crane digest "$WEBHOOK_COPY:$tag")" = "$digest"
+          echo "POD_IDENTITY_WEBHOOK_IMAGE=$WEBHOOK_COPY:$tag@$digest" >>"$GITHUB_ENV"
 
       - name: Unit tests
         working-directory: fork/eks-provisioner
