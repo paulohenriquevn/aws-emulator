@@ -260,7 +260,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // mutation. The per-upload cap bounds ONE upload; this is the registry-wide budget
         // the bytes of every in-flight upload and every stored manifest share, so a client
         // cannot hold the product of the per-record caps in this process's memory. See
-        // [`crate::state::MAX_REGISTRY_CALLER_BYTES`].
+        // [`crate::state::max_registry_caller_bytes`].
         let caller_bytes_held = store.caller_bytes_held();
 
         // An upload id is only valid for the repository it was issued for, so an id this
@@ -283,7 +283,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The addressed upload resolved, so the part is now charged against the
         // registry-wide budget: it is refused before any byte of it is kept.
         if caller_bytes_held.saturating_add(input.layer_part_blob.len())
-            > crate::state::MAX_REGISTRY_CALLER_BYTES
+            > crate::state::max_registry_caller_bytes()
         {
             return Err(refusal(
                 "registry byte budget reached",
@@ -292,7 +292,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     message: Some(format!(
                         "this registry holds at most {} bytes of in-flight layer uploads \
                          and stored image manifests together",
-                        crate::state::MAX_REGISTRY_CALLER_BYTES
+                        crate::state::max_registry_caller_bytes()
                     )),
                 }),
             )
