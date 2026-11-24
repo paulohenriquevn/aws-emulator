@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-var testInjection = endpointInjection{EndpointURL: "https://172.29.0.1:9597", ConfigMapName: "aws-emulator-ca-0123456789"}
+var testInjection = endpointInjection{GatewayIP: "172.29.0.1", Port: "9597", ConfigMapName: "aws-emulator-ca-0123456789"}
 
 // patched is pod after the injection's JSON patch, or pod itself when the injection
 // leaves it alone.
@@ -83,8 +83,9 @@ func TestEveryContainerAndInitContainerGetsTheEmulatorsEndpointAndCA(t *testing.
 	for _, container := range containers {
 		env := envOf(container)
 		for name, want := range map[string]string{
-			"AWS_ENDPOINT_URL":     "https://172.29.0.1:9597",
-			"AWS_ENDPOINT_URL_STS": "https://172.29.0.1:9597",
+			"AWS_ENDPOINT_URL":     "https://aws.emulator.internal:9597",
+			"AWS_ENDPOINT_URL_STS": "https://aws.emulator.internal:9597",
+			"AWS_ENDPOINT_URL_S3":  "https://172.29.0.1:9597",
 			"AWS_CA_BUNDLE":        "/etc/aws-emulator/ca-bundle.pem",
 			"SSL_CERT_FILE":        "/etc/aws-emulator/ca-bundle.pem",
 			"NODE_EXTRA_CA_CERTS":  "/etc/aws-emulator/ca.pem",
@@ -120,6 +121,60 @@ func TestEveryContainerAndInitContainerGetsTheEmulatorsEndpointAndCA(t *testing.
 	}
 	if len(pod.Spec.Volumes) != 2 {
 		t.Errorf("the pod's own volume was lost: %+v", pod.Spec.Volumes)
+	}
+}
+
+// aliasesOf is the hostnames each address of the pod's /etc/hosts entries names.
+func aliasesOf(pod corev1.Pod) map[string][]string {
+	names := map[string][]string{}
+	for _, alias := range pod.Spec.HostAliases {
+		names[alias.IP] = append(names[alias.IP], alias.Hostnames...)
+	}
+	return names
+}
+
+func TestAPodResolvesTheEmulatorsNameAndItsAccountPrefixedFormToTheGateway(t *testing.T) {
+	// An SDK prefixes the endpoint's host with the account id for some services (the
+	// CloudFront KeyValueStore data plane, S3 Control): a pod must resolve that name as well.
+	pod := patched(t, "loopzero-system", appPod())
+
+	got := aliasesOf(pod)["172.29.0.1"]
+
+	if len(got) != 2 || got[0] != "aws.emulator.internal" || got[1] != "000000000000.aws.emulator.internal" {
+		t.Fatalf("the gateway's host aliases are %v, want the emulator's name and its account-prefixed form", got)
+	}
+}
+
+func TestThePodsOwnHostAliasesAreKept(t *testing.T) {
+	pod := appPod()
+	pod.Spec.HostAliases = []corev1.HostAlias{{IP: "10.0.0.7", Hostnames: []string{"db.internal"}}}
+
+	got := aliasesOf(patched(t, "default", pod))
+
+	if len(got["10.0.0.7"]) != 1 || got["10.0.0.7"][0] != "db.internal" || len(got["172.29.0.1"]) != 2 {
+		t.Fatalf("the host aliases are %v, want the pod's own and the emulator's", got)
+	}
+}
+
+func TestANameThePodAlreadyAliasesIsLeftToThePod(t *testing.T) {
+	pod := appPod()
+	pod.Spec.HostAliases = []corev1.HostAlias{{IP: "10.9.9.9", Hostnames: []string{"aws.emulator.internal"}}}
+
+	got := aliasesOf(patched(t, "default", pod))
+
+	if len(got["10.9.9.9"]) != 1 || len(got["172.29.0.1"]) != 1 || got["172.29.0.1"][0] != "000000000000.aws.emulator.internal" {
+		t.Fatalf("the host aliases are %v, want the pod's own entry for the name and only the other name added", got)
+	}
+}
+
+func TestAnIPv6GatewayIsBracketedInTheS3Endpoint(t *testing.T) {
+	injection := endpointInjection{GatewayIP: "fd00::1", Port: "9597", ConfigMapName: "aws-emulator-ca-0123456789"}
+
+	pod := appPod()
+	got := envOf(applyPatch(t, pod, injection.patch("default", &pod)).Spec.Containers[0])["AWS_ENDPOINT_URL_S3"]
+
+	if len(got) != 1 || got[0] != "https://[fd00::1]:9597" {
+		t.Fatalf("AWS_ENDPOINT_URL_S3 is %v", got)
 	}
 }
 
@@ -266,5 +321,21 @@ func TestAPodLeftAloneIsAdmittedUnchangedWithoutTouchingTheNamespace(t *testing.
 
 	if !response.Allowed || response.Patch != nil {
 		t.Fatalf("got %+v", response)
+	}
+}
+
+func TestAHostNetworkPodKeepsTheGatewaysAddress(t *testing.T) {
+	// A pod on the node's network reads the node's /etc/hosts, which no hostAliases entry
+	// reaches, so it gets the address rather than a name it could not resolve.
+	pod := appPod()
+	pod.Spec.HostNetwork = true
+
+	got := patched(t, "default", pod)
+
+	if len(got.Spec.HostAliases) != 0 {
+		t.Errorf("a host network pod got host aliases: %+v", got.Spec.HostAliases)
+	}
+	if endpoint := envOf(got.Spec.Containers[0])["AWS_ENDPOINT_URL"]; len(endpoint) != 1 || endpoint[0] != "https://172.29.0.1:9597" {
+		t.Errorf("a host network pod's AWS_ENDPOINT_URL is %v", endpoint)
 	}
 }

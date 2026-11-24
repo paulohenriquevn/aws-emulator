@@ -54,9 +54,22 @@ pub enum Scheme {
 }
 
 /// The request, signed as an SDK signs it with `key` and `secret`.
-pub fn signed(scheme: &Scheme, (key, secret): (&str, &str), method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> http::Request<Bytes> {
-    let uri = format!("https://{HOST}{path}");
-    let mut request = http::Request::builder().method(method).uri(&uri).header("host", HOST);
+pub fn signed(scheme: &Scheme, keys: (&str, &str), method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> http::Request<Bytes> {
+    signed_for(HOST, scheme, keys, method, path, headers, body)
+}
+
+/// [`signed`], addressed to `host` rather than [`HOST`].
+pub fn signed_for(
+    host: &str,
+    scheme: &Scheme,
+    (key, secret): (&str, &str),
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> http::Request<Bytes> {
+    let uri = format!("https://{host}{path}");
+    let mut request = http::Request::builder().method(method).uri(&uri).header("host", host);
     for (name, value) in headers {
         request = request.header(*name, *value);
     }

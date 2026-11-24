@@ -90,6 +90,8 @@ ring = "0.17"
 # The CloudFront KeyValueStore test signs its data plane calls with SigV4A, as SDKs do.
 aws-sigv4 = {{ workspace = true, features = ["sigv4a"] }}
 aws-credential-types = {{ workspace = true }}
+# The emulator hostname test reaches the served data port over TLS under that name.
+reqwest = {{ workspace = true }}
 
 [lints]
 workspace = true

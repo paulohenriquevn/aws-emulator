@@ -48,10 +48,12 @@ type provisioner struct {
 	log        *slog.Logger
 	retryAfter map[string]time.Time
 	failures   map[string]int
-	// trust is the CA every pod of every cluster gets, and podEndpoint the emulator's
-	// address they get, which they reach through their VPC's gateway.
+	// trust is the CA every pod of every cluster gets, and gatewayIP:gatewayPort the
+	// emulator's address, which pods reach through their VPC's gateway and resolve
+	// emulatorHostname to.
 	trust       trustBundle
-	podEndpoint string
+	gatewayIP   string
+	gatewayPort string
 	addonsAt    map[string]time.Time
 	// webhookImage is the pod identity webhook image every cluster runs.
 	webhookImage string
@@ -95,6 +97,10 @@ func run(regions, stateDir, listen, stsAliases, systemRoots, webhookImage string
 	if err != nil {
 		return err
 	}
+	gatewayIP, gatewayPort, err := podGateway(endpoint)
+	if err != nil {
+		return err
+	}
 	hook, err := loadWebhookCA(stateDir)
 	if err != nil {
 		return err
@@ -127,7 +133,8 @@ func run(regions, stateDir, listen, stsAliases, systemRoots, webhookImage string
 		retryAfter:      map[string]time.Time{},
 		failures:        map[string]int{},
 		trust:           trust,
-		podEndpoint:     strings.TrimRight(endpoint, "/"),
+		gatewayIP:       gatewayIP,
+		gatewayPort:     gatewayPort,
 		addonsAt:        map[string]time.Time{},
 		webhookImage:    webhookImage,
 		registryHost:    emu.endpoint.Host,

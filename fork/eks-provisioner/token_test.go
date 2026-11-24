@@ -183,3 +183,18 @@ func TestTheWebhookStoppingOnItsOwnIsAnErrorThatSaysSo(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestATokenSignedForTheNamePodsReachTheEmulatorByIsAccepted(t *testing.T) {
+	// A pod's AWS_ENDPOINT_URL_STS names the emulator as aws.emulator.internal, so a token
+	// `aws eks get-token` makes in a pod is presigned for that host.
+	emu, err := newEmulator("https://172.29.0.1:9597", nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = parseToken(token(presignedURL("aws.emulator.internal:9597", "host%3Bx-k8s-aws-id")), emu.stsHosts, signedAt)
+
+	if err != nil {
+		t.Fatalf("a token signed for the pods' name of the emulator was refused: %v", err)
+	}
+}

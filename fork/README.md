@@ -228,9 +228,11 @@ namespaces of its scope. The principal that created the cluster has the cluster-
 `CreateCluster` gives it.
 
 A token is accepted only when its request goes to the emulator: the host of
-`AWS_ENDPOINT_URL`, or a name in `--sts-aliases` (on the emulator's own host, clients reach it
-at `localhost`, and S3 Control needs that name). Whatever the name, the provisioner sends the
-request to `AWS_ENDPOINT_URL` with that name as its `Host`, which the signature covers.
+`AWS_ENDPOINT_URL`, `aws.emulator.internal` on its port (the name pods reach the emulator by,
+so a token `aws eks get-token` makes in a pod), or a name in `--sts-aliases` (on the
+emulator's own host, clients reach it at `localhost`, and S3 Control needs that name).
+Whatever the name, the provisioner sends the request to `AWS_ENDPOINT_URL` with that name as
+its `Host`, which the signature covers.
 
 Before it registers a cluster, and again every minute while the cluster runs, the provisioner
 installs what Amazon EKS runs on its control plane, so a chart written for Amazon EKS needs no
@@ -239,7 +241,16 @@ change here:
 | Add-on | What a pod gets |
 |---|---|
 | `amazon-eks-pod-identity-webhook` v0.6.19, pinned by digest, in `kube-system` on the control-plane node | IRSA, as on Amazon EKS: a pod whose service account carries `eks.amazonaws.com/role-arn` gets `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, a projected token for the audience `sts.amazonaws.com`, `AWS_REGION`, `AWS_DEFAULT_REGION` and `AWS_STS_REGIONAL_ENDPOINTS=regional`. |
-| The MutatingWebhookConfiguration `aws-emulator-endpoint`, served by the provisioner at `/mutate/{region}/{cluster}` | Every container and init container gets `AWS_ENDPOINT_URL` and `AWS_ENDPOINT_URL_STS` (the provisioner's own `AWS_ENDPOINT_URL`), `AWS_CA_BUNDLE` and `SSL_CERT_FILE` (the public roots plus the emulator's CA), and `NODE_EXTRA_CA_CERTS` (the emulator's CA), from a ConfigMap mounted read-only at `/etc/aws-emulator`. |
+| The MutatingWebhookConfiguration `aws-emulator-endpoint`, served by the provisioner at `/mutate/{region}/{cluster}` | The pod reaches the emulator by name: its `/etc/hosts` maps `aws.emulator.internal` and `000000000000.aws.emulator.internal` to the address of the provisioner's own `AWS_ENDPOINT_URL` (`hostAliases`, added to the pod's own). Every container and init container gets `AWS_ENDPOINT_URL` and `AWS_ENDPOINT_URL_STS` (`https://aws.emulator.internal:<port>`), `AWS_ENDPOINT_URL_S3` (that address, see below), `AWS_CA_BUNDLE` and `SSL_CERT_FILE` (the public roots plus the emulator's CA), and `NODE_EXTRA_CA_CERTS` (the emulator's CA), from a ConfigMap mounted read-only at `/etc/aws-emulator`. |
+
+Pods use a name rather than the address because an SDK prefixes the endpoint's host with the
+account id for some services: a Go SDK v2 `cloudfrontkeyvaluestore` client dials
+`000000000000.<host>`, which has no meaning for an address. The emulator's certificate names
+both forms. S3 is the exception: an SDK addresses a bucket as a label of a named endpoint
+(`<bucket>.aws.emulator.internal`), which no `/etc/hosts` entry covers for every bucket, and
+by path on an address, so S3 keeps the address. A name the pod already maps in its own
+`hostAliases` keeps the pod's address. A `hostNetwork` pod reads the node's `/etc/hosts`,
+which `hostAliases` do not reach, so it gets the address for every service.
 
 The pod identity webhook runs on the control-plane node, where Amazon EKS runs it, so it serves
 pods created before any node has joined, and the cluster turns `ACTIVE` only once it is

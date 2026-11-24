@@ -156,6 +156,14 @@ pub fn aws_json_ok_response(
 /// long-lived tenant repos.
 pub const EMULATOR_ACCOUNT_ID: &str = "000000000000";
 
+/// fork: the name the pods of an EKS cluster reach the emulator by. The eks-provisioner
+/// maps it, and its [`EMULATOR_ACCOUNT_ID`]-prefixed form, to the gateway in every pod's
+/// `/etc/hosts` and points the pod's `AWS_ENDPOINT_URL` at it (`emulatorHostname` in
+/// `fork/eks-provisioner/endpoint.go`, which must stay equal to this). A name rather than
+/// the gateway's address, because an SDK prefixes the endpoint host with the account id for
+/// some services, which an address cannot carry. The TLS certificate names both forms.
+pub const EMULATOR_HOSTNAME: &str = "aws.emulator.internal";
+
 /// The canonical AWS account id ([`EMULATOR_ACCOUNT_ID`]) every generated emulator
 /// must present. Prefer this accessor over hardcoding the literal so the account
 /// contract has exactly one source of truth.

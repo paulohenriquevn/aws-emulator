@@ -37,6 +37,8 @@ impl TlsCertificateAuthority {
 
     /// The certificate of this process, made on first use for `localhost`, `127.0.0.1`, `::1`,
     /// the `EMULATOR_BIND_ADDRESS` interface and `client_host` when they name one address.
+    /// fork: and for the account-prefixed `localhost`, [`crate::EMULATOR_HOSTNAME`] and its
+    /// account-prefixed form.
     ///
     /// The first call decides the names, so a `client_host` the certificate was not made for is
     /// not added later: check [`Self::covers`].
@@ -52,6 +54,10 @@ impl TlsCertificateAuthority {
         let mut names: Vec<String> =
             ["localhost", "127.0.0.1", "::1"].map(String::from).into();
         names.insert(1, format!("{}.localhost", crate::EMULATOR_ACCOUNT_ID));
+        // fork: the name pods of an EKS cluster reach the emulator by, and the form an SDK
+        // prefixes with the account id ([`crate::EMULATOR_HOSTNAME`]).
+        names.insert(2, crate::EMULATOR_HOSTNAME.to_string());
+        names.insert(3, format!("{}.{}", crate::EMULATOR_ACCOUNT_ID, crate::EMULATOR_HOSTNAME));
         // fork: the extra loopback addresses a resource may listen on when its configured
         // port is taken on 127.0.0.1 (`listeners::EXTRA_LOOPBACK_ADDRESSES`).
         names.extend(

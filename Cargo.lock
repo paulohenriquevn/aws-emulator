@@ -458,6 +458,7 @@ dependencies = [
  "axum 0.8.9",
  "bytes",
  "http",
+ "reqwest",
  "ring",
  "rustls",
  "serde_json",

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,7 +52,9 @@ var podsResource = metav1.GroupVersionResource{Version: "v1", Resource: "pods"}
 // endpointInjection is what makes a pod's AWS clients reach the emulator instead of
 // *.amazonaws.com: its endpoint, and its CA from the ConfigMap ensureTrustBundle creates.
 type endpointInjection struct {
-	EndpointURL   string
+	// GatewayIP is the address pods reach the emulator at, and Port its port there.
+	GatewayIP     string
+	Port          string
 	ConfigMapName string
 }
 
@@ -68,11 +71,23 @@ type patchOperation struct {
 // clients that ignore AWS_CA_BUNDLE (Go's and OpenSSL's own HTTP clients), and points at
 // a bundle that keeps the public roots, so a pod still reaches GHCR or any other public
 // endpoint. NODE_EXTRA_CA_CERTS adds the CA for Node.js, which reads neither.
-func (injection endpointInjection) environment() []corev1.EnvVar {
+//
+// The endpoint names the emulator by emulatorHostname, except for S3: an SDK addresses a
+// bucket under the endpoint's host (`<bucket>.aws.emulator.internal`) unless that host is
+// an address, and no /etc/hosts entry covers every bucket, so S3 keeps the gateway's address,
+// where SDKs address buckets by path. A pod on the node's network reads the node's
+// /etc/hosts, which hostAliases do not reach, so it gets the address throughout.
+func (injection endpointInjection) environment(pod *corev1.Pod) []corev1.EnvVar {
 	bundle := caMountPath + "/" + combinedBundleKey
+	byAddress := "https://" + net.JoinHostPort(injection.GatewayIP, injection.Port)
+	byName := "https://" + net.JoinHostPort(emulatorHostname, injection.Port)
+	if pod.Spec.HostNetwork {
+		byName = byAddress
+	}
 	return []corev1.EnvVar{
-		{Name: "AWS_ENDPOINT_URL", Value: injection.EndpointURL},
-		{Name: "AWS_ENDPOINT_URL_STS", Value: injection.EndpointURL},
+		{Name: "AWS_ENDPOINT_URL", Value: byName},
+		{Name: "AWS_ENDPOINT_URL_STS", Value: byName},
+		{Name: "AWS_ENDPOINT_URL_S3", Value: byAddress},
 		{Name: "AWS_CA_BUNDLE", Value: bundle},
 		{Name: "SSL_CERT_FILE", Value: bundle},
 		{Name: "NODE_EXTRA_CA_CERTS", Value: caMountPath + "/" + emulatorCAKey},
@@ -80,7 +95,7 @@ func (injection endpointInjection) environment() []corev1.EnvVar {
 }
 
 // patch is the JSON patch that gives every container and init container of pod the
-// emulator's endpoint and CA, or nil when the pod is left alone: it runs in an excluded
+// emulator's endpoint and CA, and the pod the /etc/hosts entry its name needs, or nil when the pod is left alone: it runs in an excluded
 // namespace with no IRSA role, already names an endpoint of its own, or was patched already.
 func (injection endpointInjection) patch(namespace string, pod *corev1.Pod) []patchOperation {
 	if excludedNamespaces[namespace] && !hasIRSARole(pod) {
@@ -102,6 +117,9 @@ func (injection endpointInjection) patch(namespace string, pod *corev1.Pod) []pa
 		LocalObjectReference: corev1.LocalObjectReference{Name: injection.ConfigMapName},
 	}}}
 	operations := appendTo(nil, "/spec/volumes", len(pod.Spec.Volumes) == 0, volume)
+	if alias, ok := injection.hostAlias(pod); ok && !pod.Spec.HostNetwork {
+		operations = appendTo(operations, "/spec/hostAliases", len(pod.Spec.HostAliases) == 0, alias)
+	}
 	mount := corev1.VolumeMount{Name: caVolumeName, MountPath: caMountPath, ReadOnly: true}
 	fields := []struct {
 		name       string
@@ -111,7 +129,7 @@ func (injection endpointInjection) patch(namespace string, pod *corev1.Pod) []pa
 		for index, container := range field.containers {
 			base := "/spec/" + field.name + "/" + strconv.Itoa(index)
 			var missing []any
-			for _, variable := range injection.environment() {
+			for _, variable := range injection.environment(pod) {
 				if !setsVariable(container, variable.Name) {
 					missing = append(missing, variable)
 				}
@@ -121,6 +139,24 @@ func (injection endpointInjection) patch(namespace string, pod *corev1.Pod) []pa
 		}
 	}
 	return operations
+}
+
+// hostAlias is the /etc/hosts entry that maps the emulator's names to the gateway, leaving
+// out a name the pod already maps itself; false when the pod maps them all.
+func (injection endpointInjection) hostAlias(pod *corev1.Pod) (corev1.HostAlias, bool) {
+	aliased := map[string]bool{}
+	for _, alias := range pod.Spec.HostAliases {
+		for _, name := range alias.Hostnames {
+			aliased[name] = true
+		}
+	}
+	alias := corev1.HostAlias{IP: injection.GatewayIP}
+	for _, name := range emulatorHostnames() {
+		if !aliased[name] {
+			alias.Hostnames = append(alias.Hostnames, name)
+		}
+	}
+	return alias, len(alias.Hostnames) > 0
 }
 
 // appendTo adds values to the array at path, creating it when the object has none.
@@ -196,7 +232,7 @@ func (p *provisioner) servePodMutations(writer http.ResponseWriter, request *htt
 		http.Error(writer, fmt.Sprintf("the body is not an AdmissionReview with a request: %v", err), http.StatusBadRequest)
 		return
 	}
-	injection := endpointInjection{EndpointURL: p.podEndpoint, ConfigMapName: p.trust.configMapName()}
+	injection := endpointInjection{GatewayIP: p.gatewayIP, Port: p.gatewayPort, ConfigMapName: p.trust.configMapName()}
 	review.Response = admit(review, injection, func(namespace string) error {
 		return p.ensureTrustBundle(request.Context(), region, cluster, namespace)
 	})

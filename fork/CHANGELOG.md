@@ -13,6 +13,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - A distribution's edge runs the `viewer-request` CloudFront Function its cache behavior associates, from the function's `LIVE` stage, over the event object CloudFront builds for the request. A response the function returns is served without asking the origin, a request it returns goes on with its uri, query string, headers and cookies, and a function that throws or runs out of its budget is answered 503
 - A `cloudfront-js-2.0` function can `import cf from 'cloudfront'`: `cf.kvs()` reads the associated key value store (`get` in the string, json and bytes formats, `exists` and `meta`), and `cf.updateRequestOrigin` sends the origin request to another `domainName` with another `hostHeader`, `originPath` or `customHeaders`; another origin property makes the request fail with 503 and is logged. `TestFunction` runs the same module
 
+### Changed
+- eks-provisioner: pods reach the emulator as `aws.emulator.internal`. The endpoint webhook maps that name and `000000000000.aws.emulator.internal` to the gateway in the pod's `hostAliases` and sets `AWS_ENDPOINT_URL` and `AWS_ENDPOINT_URL_STS` to `https://aws.emulator.internal:<port>`, so an SDK that prefixes the endpoint host with the account id (the CloudFront KeyValueStore data plane, S3 Control) resolves it; `AWS_ENDPOINT_URL_S3` keeps the gateway's address, where SDKs address buckets by path. The emulator's certificate names both forms, and a cluster token presigned for the name is accepted
+
 ## [0.4.2] - 2026-11-24
 
 ### Fixed

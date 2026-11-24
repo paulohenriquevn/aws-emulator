@@ -241,6 +241,9 @@ jobs:
           cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --test all -- edge_viewer_request_function function_test_run
           cargo test -p aws-emulator-fork-router --test cloudfront_viewer_request_function
 
+      - name: Pods reach the emulator by name, account-prefixed included
+        run: cargo test -p aws-emulator-fork-router --test emulator_hostname
+
       - name: Unit tests of the workload identity patches
         run: >-
           cargo test --lib
