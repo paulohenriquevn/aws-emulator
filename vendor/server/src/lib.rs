@@ -1794,6 +1794,11 @@ fn service_from_host_authority(host: &str) -> Option<String> {
         .split(':')
         .next()
         .unwrap_or(host_no_userinfo);
+    // The emulator's own name, which pods resolve to it, addresses no service, the same
+    // as `localhost`; its account-prefixed form has a numeric first label already.
+    if host_no_port.eq_ignore_ascii_case(EMULATOR_HOSTNAME) {
+        return None;
+    }
     let label = host_no_port.split('.').next()?;
     let key = normalize_service_key(label);
     if key.is_empty() || key == "localhost" || key.bytes().all(|b| b.is_ascii_digit()) {
@@ -3199,6 +3204,23 @@ mod tests {
         check!(service_from_host(&local).is_none());
         let ip = headers_with(&[("host", "127.0.0.1:8443")]);
         check!(service_from_host(&ip).is_none());
+    }
+
+    /// Pods reach the emulator as `aws.emulator.internal`, the way a client on the host
+    /// reaches it as `localhost`: the emulator's own name addresses no service, so an
+    /// unsigned STS `AssumeRoleWithWebIdentity` sent to it is still left for STS to claim.
+    #[test]
+    fn service_from_host_ignores_the_emulators_own_name() {
+        for host in [
+            format!("{EMULATOR_HOSTNAME}:9597"),
+            EMULATOR_HOSTNAME.to_uppercase(),
+            format!("{EMULATOR_ACCOUNT_ID}.{EMULATOR_HOSTNAME}:9597"),
+        ] {
+            let headers = headers_with(&[("host", &host)]);
+            check!(service_from_host(&headers).is_none(), "host {host}");
+        }
+        let parts = parts_with(&[("host", "aws.emulator.internal:9597")]);
+        check!(resolve_route_key(&parts).is_none());
     }
 
     #[test]

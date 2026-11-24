@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Changed
 - eks-provisioner: pods reach the emulator as `aws.emulator.internal`. The endpoint webhook maps that name and `000000000000.aws.emulator.internal` to the gateway in the pod's `hostAliases` and sets `AWS_ENDPOINT_URL` and `AWS_ENDPOINT_URL_STS` to `https://aws.emulator.internal:<port>`, so an SDK that prefixes the endpoint host with the account id (the CloudFront KeyValueStore data plane, S3 Control) resolves it; `AWS_ENDPOINT_URL_S3` keeps the gateway's address, where SDKs address buckets by path. The emulator's certificate names both forms, and a cluster token presigned for the name is accepted
 
+### Fixed
+- A request addressed to `aws.emulator.internal`, the name pods reach the emulator by, no longer routes as a service named `aws`. An unsigned STS `AssumeRoleWithWebIdentity` from a pod answered `UnknownService`, so no IRSA pod could get credentials
+
 ## [0.4.2] - 2026-11-24
 
 ### Fixed
