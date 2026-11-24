@@ -49,7 +49,8 @@ pub use listeners::{
 /// Extract AWS Access Key ID from SigV4 Authorization header.
 ///
 /// Parses the `Credential=AKID/...` component from the standard
-/// `AWS4-HMAC-SHA256 Credential=...` header format.
+/// `AWS4-HMAC-SHA256 Credential=...` header format, and (fork) from SigV4A's
+/// `AWS4-ECDSA-P256-SHA256 Credential=...`.
 ///
 /// Returns `"default"` if the header is missing, unparseable, or empty.
 pub fn extract_akid(headers: &http::HeaderMap) -> String {
@@ -57,8 +58,12 @@ pub fn extract_akid(headers: &http::HeaderMap) -> String {
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|auth| {
-            auth.strip_prefix("AWS4-HMAC-SHA256 Credential=")
-                .or_else(|| auth.strip_prefix("AWS4-HMAC-SHA256  Credential="))
+            let fields = auth
+                .strip_prefix("AWS4-HMAC-SHA256 ")
+                .or_else(|| auth.strip_prefix("AWS4-ECDSA-P256-SHA256 "))?;
+            fields
+                .strip_prefix("Credential=")
+                .or_else(|| fields.strip_prefix(" Credential="))
         })
         .and_then(|cred| cred.split('/').next())
         .filter(|akid| !akid.is_empty())
@@ -2263,6 +2268,19 @@ mod tests {
         headers.insert(
             "authorization",
             "AWS4-HMAC-SHA256  Credential=TESTKEY/20240101/us-east-1/kms/aws4_request, SignedHeaders=host, Signature=abc"
+                .parse()
+                .unwrap(),
+        );
+        check!(extract_akid(&headers) == "TESTKEY");
+    }
+
+    /// fork: SigV4A's scope has no region field, and its key is the caller's as in SigV4.
+    #[test]
+    fn extract_akid_sigv4a() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "AWS4-ECDSA-P256-SHA256 Credential=TESTKEY/20240101/cloudfront-keyvaluestore/aws4_request, SignedHeaders=host;x-amz-region-set, Signature=3045"
                 .parse()
                 .unwrap(),
         );

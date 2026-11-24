@@ -27,6 +27,7 @@ struct Client {
     secret: &'static str,
     presigned_for: Option<Duration>,
     signed_at: SystemTime,
+    session_token: Option<&'static str>,
 }
 
 const SQS: Client = Client {
@@ -37,6 +38,7 @@ const SQS: Client = Client {
     secret: SECRET,
     presigned_for: None,
     signed_at: SystemTime::UNIX_EPOCH,
+    session_token: None,
 };
 
 /// The SDKs sign IoT Secure Tunneling with its modeled `aws.auth#sigv4` name as written.
@@ -447,4 +449,336 @@ fn a_validity_the_verifier_refuses_is_not_signed() {
     assert!(presign_url(&target, KEY, SECRET, now, MAX_PRESIGNED_EXPIRES_SECS).is_some());
     assert_eq!(presign_url(&target, KEY, SECRET, now, MAX_PRESIGNED_EXPIRES_SECS + 1), None);
     assert_eq!(presign_url(&target, KEY, SECRET, now, 0), None);
+}
+
+// fork: SigV4A (`AWS4-ECDSA-P256-SHA256`), the scheme SDKs sign the CloudFront KeyValueStore
+// data plane with.
+
+/// The data plane of a CloudFront key value store, as SDKs sign it: SigV4A over the region set
+/// `*`, under the signing name `cloudfront-keyvaluestore`.
+const KVS: Client = Client {
+    service: "cloudfront-keyvaluestore",
+    region: "*",
+    ..SQS
+};
+
+/// A store ARN in a path, as SDKs encode it: `:` and `/` percent-encoded.
+const STORE_PATH: &str = "/key-value-stores/arn%3Aaws%3Acloudfront%3A%3A000000000000%3A\
+                          key-value-store%2F0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+const PUT_KEY_BODY: &[u8] = br#"{"Value":"cell-1"}"#;
+
+/// Signs as an SDK signs a SigV4A request: aws-sigv4's own SigV4A signer, for the region set
+/// `client.region` names.
+fn sigv4a_signed(
+    client: &Client,
+    mut request: http::Request<Vec<u8>>,
+) -> (http::request::Parts, Vec<u8>) {
+    let credentials = aws_credential_types::Credentials::new(
+        client.key,
+        client.secret,
+        client.session_token.map(str::to_string),
+        None,
+        "test",
+    );
+    let identity = credentials.into();
+    let mut settings = SigningSettings::default();
+    if signs_like_s3(client.service) {
+        settings.percent_encoding_mode = PercentEncodingMode::Single;
+        settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
+    }
+    let unset = client.signed_at == SystemTime::UNIX_EPOCH;
+    let at = if unset {
+        SystemTime::now()
+    } else {
+        client.signed_at
+    };
+    let params = aws_sigv4::sign::v4a::SigningParams::builder().identity(&identity);
+    let params = params.region_set(client.region).name(client.service);
+    let params = params.time(at).settings(settings).build().unwrap().into();
+    let (method, uri) = (request.method().to_string(), request.uri().to_string());
+    let headers = request.headers().iter();
+    let headers = headers.map(|(name, value)| (name.as_str(), value.to_str().unwrap()));
+    let body = SignableBody::Bytes(request.body());
+    let signable = SignableRequest::new(&method, &uri, headers, body).unwrap();
+    let (instructions, _) = sign(signable, &params).unwrap().into_parts();
+    instructions.apply_to_request_http1x(&mut request);
+    request.into_parts()
+}
+
+fn put_key() -> http::Request<Vec<u8>> {
+    let uri = format!("https://127.0.0.1:8443{STORE_PATH}/keys/tenant.example.com");
+    let mut request = request("PUT", &uri, PUT_KEY_BODY);
+    let etag = http::HeaderValue::from_static("ETAG-1");
+    request.headers_mut().insert("if-match", etag);
+    request
+}
+
+fn list_keys() -> http::Request<Vec<u8>> {
+    let uri = format!("https://127.0.0.1:8443{STORE_PATH}/keys?MaxResults=10&NextToken=a%2Bb%3D");
+    request("GET", &uri, b"")
+}
+
+fn with_authorization(parts: http::request::Parts, from: &str, to: &str) -> http::request::Parts {
+    let authorization = parts.headers["authorization"].to_str().unwrap().replace(from, to);
+    with_header(parts, "authorization", &authorization)
+}
+
+fn without_header(mut parts: http::request::Parts, name: &str) -> http::request::Parts {
+    parts.headers.remove(name);
+    parts
+}
+
+#[test]
+fn a_sigv4a_authorization_header_is_recognized() {
+    let (parts, _) = sigv4a_signed(&KVS, put_key());
+    assert!(emulator().recognizes(&parts));
+    let other = with_authorization(parts, "AWS4-ECDSA-P256-SHA256 ", "AWS4-ECDSA-P384-SHA384 ");
+    assert!(!emulator().recognizes(&other), "an algorithm this emulator does not verify");
+}
+
+#[test]
+fn sigv4a_requests_are_accepted_or_refused_as_their_signature_says() {
+    let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+    let kvs = "cloudfront-keyvaluestore";
+    let put = || sigv4a_signed(&KVS, put_key()).0;
+    let body = PUT_KEY_BODY.to_vec();
+    #[rustfmt::skip]
+    let cases: Vec<(&str, http::request::Parts, Vec<u8>, &str, Result<(), &str>)> = vec![
+        ("put key", put(), body.clone(), kvs, Ok(())),
+        ("list keys, query with encoded + and =", sigv4a_signed(&KVS, list_keys()).0, vec![], kvs, Ok(())),
+        ("signed for the region set us-east-1", sigv4a_signed(&Client { region: "us-east-1", ..KVS }, put_key()).0, body.clone(), kvs, Ok(())),
+        ("signed for a region set of two", sigv4a_signed(&Client { region: "us-east-1,eu-west-1", ..KVS }, put_key()).0, body.clone(), kvs, Ok(())),
+        ("in-process, no host header", sigv4a_signed(&KVS, in_process()).0, vec![], kvs, Ok(())),
+        ("s3 multi-region access point get, key with a space", sigv4a_signed(&Client { service: "s3", ..KVS }, s3_get("key%20one")).0, vec![], "s3", Ok(())),
+        ("added unsigned header", with_header(put(), "x-amz-user-agent", "other"), body.clone(), kvs, Ok(())),
+        ("tampered body", put(), br#"{"Value":"cell-2"}"#.to_vec(), kvs, Err("SignatureDoesNotMatch")),
+        ("tampered signed header", with_header(put(), "if-match", "ETAG-2"), body.clone(), kvs, Err("SignatureDoesNotMatch")),
+        ("retargeted path", with_uri(put(), "tenant.example.com", "other.example.com"), body.clone(), kvs, Err("SignatureDoesNotMatch")),
+        ("tampered query", with_uri(sigv4a_signed(&KVS, list_keys()).0, "MaxResults=10", "MaxResults=50"), vec![], kvs, Err("SignatureDoesNotMatch")),
+        ("tampered region set", with_header(put(), "x-amz-region-set", "us-east-1"), body.clone(), kvs, Err("SignatureDoesNotMatch")),
+        ("signed by another secret", sigv4a_signed(&Client { secret: "x", ..KVS }, put_key()).0, body.clone(), kvs, Err("SignatureDoesNotMatch")),
+        ("signature that is not DER", with_authorization(put(), "Signature=30", "Signature=31"), body.clone(), kvs, Err("SignatureDoesNotMatch")),
+        ("signature that is not hex", with_authorization(put(), "Signature=30", "Signature=zz"), body.clone(), kvs, Err("SignatureDoesNotMatch")),
+        ("another key", sigv4a_signed(&Client { key: "EMULATORB", ..KVS }, put_key()).0, body.clone(), kvs, Err("AccessDenied")),
+        ("signed for another service", put(), body.clone(), "cloudfront", Err("AccessDenied")),
+        ("scope naming another service", with_authorization(put(), "/cloudfront-keyvaluestore/", "/cloudfront/"), body.clone(), kvs, Err("AccessDenied")),
+        ("scope with a region field (five parts)", with_authorization(put(), "/cloudfront-keyvaluestore/", "/us-east-1/cloudfront-keyvaluestore/"), body.clone(), kvs, Err("AccessDenied")),
+        ("scope with another terminator", with_authorization(put(), "/aws4_request", "/aws4_other"), body.clone(), kvs, Err("AccessDenied")),
+        ("region set left out of SignedHeaders", with_authorization(put(), ";x-amz-region-set", ""), body.clone(), kvs, Err("AccessDenied")),
+        ("region set header missing", without_header(put(), "x-amz-region-set"), body.clone(), kvs, Err("AccessDenied")),
+        ("signed header missing", without_header(put(), "if-match"), body.clone(), kvs, Err("SignatureDoesNotMatch")),
+        ("signed an hour ago, replayed", sigv4a_signed(&Client { signed_at: hour_ago, ..KVS }, put_key()).0, body.clone(), kvs, Err("RequestTimeTooSkewed")),
+        ("unsigned", put_key().into_parts().0, body.clone(), kvs, Err("AccessDenied")),
+    ];
+    for (name, parts, body, serving, expected) in cases {
+        assert_eq!(verdict(&parts, &body, serving), expected, "{name}");
+    }
+}
+
+#[test]
+fn created_session_credentials_verify_over_sigv4a_with_their_token() {
+    let store = store();
+    let created = store.create(&crate::aws_credentials::AWS_SESSION);
+    let leak = |text: &str| -> &'static str { Box::leak(text.into()) };
+    let secret = leak(created.secret(SECRET_ACCESS_KEY).unwrap());
+    let token = leak(created.secret(SESSION_TOKEN).unwrap());
+    let session = Client { key: leak(&created.id), secret, session_token: Some(token), ..KVS };
+    let verdict_of = |parts: &http::request::Parts| {
+        verdict_in(&store, parts, PUT_KEY_BODY, "cloudfront-keyvaluestore")
+    };
+    assert_eq!(verdict_of(&sigv4a_signed(&session, put_key()).0), Ok(()));
+    let without_token = Client { session_token: None, ..session };
+    let refused = verdict_of(&sigv4a_signed(&without_token, put_key()).0);
+    assert_eq!(refused, Err("InvalidClientTokenId"));
+    store.delete(&created.id).unwrap();
+    assert_eq!(verdict_of(&sigv4a_signed(&session, put_key()).0), Err("AccessDenied"));
+}
+
+/// ECDSA signatures are randomized: Go and the CRT (the AWS CLI) sign with a fresh nonce, so a
+/// request is never verified by signing it again.
+#[test]
+fn a_randomized_sigv4a_signature_verifies() {
+    let (parts, body) = sigv4a_signed(&KVS, put_key());
+    let signed = Signature::of(&parts).unwrap();
+    let string_to_sign = sigv4a::string_to_sign(&parts, &body, &signed).unwrap();
+    let private_key = aws_sigv4::sign::v4a::generate_signing_key(KEY, SECRET);
+    let public_key = sigv4a::public_key(KEY, SECRET).unwrap();
+    let algorithm = &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1_SIGNING;
+    let key_pair = aws_lc_rs::signature::EcdsaKeyPair::from_private_key_and_public_key(
+        algorithm,
+        private_key.as_ref(),
+        &public_key,
+    )
+    .unwrap();
+    let random = aws_lc_rs::rand::SystemRandom::new();
+    let sign_once = || key_pair.sign(&random, string_to_sign.as_bytes()).unwrap();
+    let (first, second) = (hex::encode(sign_once()), hex::encode(sign_once()));
+    assert_ne!(first, second, "each signature takes a fresh nonce");
+    for signature in [first, second] {
+        let resigned = with_authorization(parts.clone(), &signed.value, &signature);
+        assert_eq!(verdict(&resigned, &body, "cloudfront-keyvaluestore"), Ok(()));
+    }
+}
+
+/// The AWS signing test suite (awslabs/aws-c-auth, as aws-sigv4 1.6.5 ships it): requests
+/// signed by the CRT, each with its own random nonce, for `AKIDEXAMPLE` on 2015-08-30.
+const SUITE_KEY: &str = "AKIDEXAMPLE";
+const SUITE_SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+const SUITE_PUBLIC_KEY_X: &str = "b6618f6a65740a99e650b33b6b4b5bd0d43b176d721a3edfea7e7d2d56d936b1";
+const SUITE_PUBLIC_KEY_Y: &str = "865ed22a7eadc9c5cb9d2cbaca1b3699139fedc5043dc6661864218330c8e518";
+
+struct SuiteRequest {
+    name: &'static str,
+    method: &'static str,
+    path_and_query: &'static str,
+    headers: &'static [(&'static str, &'static str)],
+    body: &'static [u8],
+    signed_headers: &'static str,
+    signature: &'static str,
+}
+
+const SUITE: [SuiteRequest; 4] = [
+    SuiteRequest {
+        name: "get-vanilla",
+        method: "GET",
+        path_and_query: "/",
+        headers: &[],
+        body: b"",
+        signed_headers: "host;x-amz-date;x-amz-region-set",
+        signature: "3046022100fddaaf816a31e30d04973875b13bc27b98da10907a3a1872fd5819a221334abc\
+                    022100de2ee81d83b54f31efc82834de07e6cd4d5c6f25bfa08e0f29a15bb0977c343e",
+    },
+    SuiteRequest {
+        name: "get-vanilla-query-order-key-case",
+        method: "GET",
+        path_and_query: "/?Param2=value2&Param1=value1",
+        headers: &[],
+        body: b"",
+        signed_headers: "host;x-amz-date;x-amz-region-set",
+        signature: "30450220394fa0699225f403514cb4db03b7c479f64c5f9864bf520b871bb23a054d6517\
+                    022100d4445c909fc62a43c6c485a8582621e0e14c6ef1e4218072bc2dcaffc1188f18",
+    },
+    SuiteRequest {
+        name: "get-relative-relative-normalized",
+        method: "GET",
+        path_and_query: "/example1/example2/../..",
+        headers: &[],
+        body: b"",
+        signed_headers: "host;x-amz-date;x-amz-region-set",
+        signature: "304402203edb747d59fe32db47529b2e5e02c9276759b7c43ad9e36ff62d52b8dbeb00e3\
+                    022007f99e8601938b893fe6dcbac9259fec2f3797b0e3d74fd66d59b09e83b8c1d4",
+    },
+    SuiteRequest {
+        name: "post-x-www-form-urlencoded",
+        method: "POST",
+        path_and_query: "/",
+        headers: &[
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("content-length", "13"),
+            (
+                "x-amz-content-sha256",
+                "9095672bbd1f56dfc5b65f3e153adc8731a4a654192329106275f4c7b24d0b6e",
+            ),
+        ],
+        body: b"Param1=value1",
+        signed_headers: "content-length;content-type;host;x-amz-content-sha256;x-amz-date;\
+                         x-amz-region-set",
+        signature: "3045022100955bbc0f0b9d4284719808642167f7d5ea4a72f8c296b75b442898c8b81cd7e5\
+                    02202425fb97620fa9a20344d22b248dd00db07524fc39b5ad77533e00b277331241",
+    },
+];
+
+fn suite_parts(suite: &SuiteRequest) -> http::request::Parts {
+    let authorization = format!(
+        "AWS4-ECDSA-P256-SHA256 Credential={SUITE_KEY}/20150830/service/aws4_request, \
+         SignedHeaders={}, Signature={}",
+        suite.signed_headers, suite.signature
+    );
+    let mut builder = http::Request::builder()
+        .method(suite.method)
+        .uri(suite.path_and_query)
+        .header("host", "example.amazonaws.com")
+        .header("x-amz-date", "20150830T123600Z")
+        .header("x-amz-region-set", "us-east-1")
+        .header("authorization", authorization);
+    for (name, value) in suite.headers {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(()).unwrap().into_parts().0
+}
+
+#[test]
+fn the_public_key_is_derived_as_the_aws_signing_test_suite_derives_it() {
+    let public_key = sigv4a::public_key(SUITE_KEY, SUITE_SECRET).unwrap();
+    let expected = format!("04{SUITE_PUBLIC_KEY_X}{SUITE_PUBLIC_KEY_Y}");
+    assert_eq!(hex::encode(public_key), expected);
+}
+
+#[test]
+fn the_aws_signing_test_suite_sigv4a_signatures_verify_and_tampered_copies_do_not() {
+    for suite in &SUITE {
+        let parts = suite_parts(suite);
+        let matches = |parts: &http::request::Parts, body: &[u8]| {
+            let signed = Signature::of(parts).unwrap();
+            sigv4a::signature_matches(parts, body, &signed, SUITE_KEY, SUITE_SECRET)
+        };
+        assert!(matches(&parts, suite.body), "{}", suite.name);
+        let retargeted = with_uri(parts.clone(), "/", "/other/");
+        assert!(!matches(&retargeted, suite.body), "{}: retargeted", suite.name);
+        let redated = with_header(parts.clone(), "x-amz-date", "20150830T123601Z");
+        assert!(!matches(&redated, suite.body), "{}: another date", suite.name);
+        let other_secret = Signature::of(&parts).unwrap();
+        let by_other = sigv4a::signature_matches(&parts, suite.body, &other_secret, SUITE_KEY, "x");
+        assert!(!by_other, "{}: another secret", suite.name);
+    }
+}
+
+/// The canonical request SigV4A signs is SigV4's: this checks the one the verifier builds
+/// against aws-sigv4's SigV4 signer, over the request shapes the SigV4 cases above cover.
+#[test]
+fn the_canonical_request_is_the_one_the_sigv4_signer_signs() {
+    let s3 = Client { service: "s3", ..SQS };
+    let hashed = Client { hashed_payload: true, ..s3 };
+    let query = || request("GET", "https://127.0.0.1:8443/a/./b/../c?b=2&a=1&a=0&c=x%2By%20z&d", b"");
+    #[rustfmt::skip]
+    let cases: Vec<(&str, (http::request::Parts, Vec<u8>), Vec<u8>)> = vec![
+        ("sqs post", signed(&SQS, send_message()), br#"{"QueueUrl":"q"}"#.to_vec()),
+        ("in-process, no host header", signed(&SQS, in_process()), vec![]),
+        ("query with repeated keys, dot segments", signed(&SQS, query()), vec![]),
+        ("kvs path with an encoded ARN", signed(&Client { service: "cloudfront-keyvaluestore", ..SQS }, put_key()), PUT_KEY_BODY.to_vec()),
+        ("s3 key with a space", signed(&s3, get_object()), vec![]),
+        ("s3 key holding a literal %2F", signed(&s3, s3_get("a%252Fb")), vec![]),
+        ("s3 key with ! + space ~ and UTF-8", signed(&s3, s3_get("%21%2B%20~%D0%BA")), vec![]),
+        ("s3 put with hashed payload", signed(&hashed, request("PUT", "https://127.0.0.1:8443/bucket/key", b"object")), b"object".to_vec()),
+    ];
+    for (name, (parts, _), body) in cases {
+        let signed = Signature::of(&parts).unwrap();
+        let canonical_request = sigv4a::canonical_request(&parts, &body, &signed).unwrap();
+        let [_, date, region, service, _] = &signed.scope[..] else { panic!("{name}") };
+        let hashed_request = hex::encode(aws_lc_rs::digest::digest(
+            &aws_lc_rs::digest::SHA256,
+            canonical_request.as_bytes(),
+        ));
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{}\n{date}/{region}/{service}/aws4_request\n{hashed_request}",
+            signed.amz_date
+        );
+        let at = parse_amz_date(&signed.amz_date).unwrap();
+        let key = aws_sigv4::sign::v4::generate_signing_key(SECRET, at, region, service);
+        let signature = aws_sigv4::sign::v4::calculate_signature(key, string_to_sign.as_bytes());
+        assert_eq!(signature, signed.value, "{name}:\n{canonical_request}");
+    }
+}
+
+#[test]
+fn a_chunk_signed_sigv4a_stream_is_refused_since_its_chunks_are_not_verified() {
+    let marker = "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD";
+    let s3_put = request("PUT", "https://127.0.0.1:8443/bucket/key", b"");
+    let mut s3_put = s3_put;
+    let value = http::HeaderValue::from_static(marker);
+    s3_put.headers_mut().insert("x-amz-content-sha256", value);
+    let (parts, _) = sigv4a_signed(&Client { service: "s3", ..KVS }, s3_put);
+    let signed = Signature::of(&parts).unwrap();
+    assert_eq!(sigv4a::canonical_request(&parts, b"", &signed), None);
+    assert_eq!(verdict(&parts, b"", "s3"), Err("SignatureDoesNotMatch"));
 }
