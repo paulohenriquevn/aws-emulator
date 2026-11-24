@@ -431,14 +431,15 @@ async fn a_part_is_accepted_only_for_an_upload_of_the_named_repository() {
     );
 }
 
-/// One upload holds at most [`state::MAX_LAYER_UPLOAD_BYTES`] bytes: the part that fills
+/// One upload holds at most [`state::max_layer_upload_bytes`] bytes: the part that fills
 /// the cap is still accepted, and the part past it is refused with the
 /// `LimitExceededException` this operation models, keeping none of its bytes.
 ///
 /// The cap is read from the constant, so the boundary tested is wherever the
 /// implementation puts it. The bytes below it are seeded straight into the store (the
 /// suite holds the engine): what is under test is the boundary, not a hundred megabytes
-/// of round trips.
+/// of round trips. With the default registry budget the cap is 512 MiB, so the seed
+/// allocates that much.
 #[tokio::test]
 async fn the_part_past_the_upload_byte_cap_is_refused() {
     let (router, engine) = emulator_with_engine();
@@ -447,14 +448,14 @@ async fn the_part_past_the_upload_byte_cap_is_refused() {
 
     // One byte short of the cap, so the next wire call is the one that fills it. The
     // capacity is reserved up front so appending the last byte reallocates nothing.
-    let seeded = state::MAX_LAYER_UPLOAD_BYTES - 1;
+    let seeded = state::max_layer_upload_bytes() - 1;
     {
         let store = state::service_state(&*engine).expect("the ecr store");
         let mut store = store.lock();
         let upload = store
             .upload_mut(repository_name, &upload_id)
             .expect("the upload just opened");
-        let mut received = Vec::with_capacity(state::MAX_LAYER_UPLOAD_BYTES);
+        let mut received = Vec::with_capacity(state::max_layer_upload_bytes());
         received.resize(seeded, 0_u8);
         upload.received_bytes = received;
     }
@@ -475,7 +476,7 @@ async fn the_part_past_the_upload_byte_cap_is_refused() {
     );
     assert_eq!(
         stored_upload(&engine, &upload_id).received_bytes.len(),
-        state::MAX_LAYER_UPLOAD_BYTES,
+        state::max_layer_upload_bytes(),
         "the upload holds every byte accepted up to the cap"
     );
 
@@ -494,12 +495,12 @@ async fn the_part_past_the_upload_byte_cap_is_refused() {
         over.error_code(),
         "LimitExceededException",
         "expected LimitExceededException past {} bytes, got {:?}",
-        state::MAX_LAYER_UPLOAD_BYTES,
+        state::max_layer_upload_bytes(),
         over.body
     );
     assert_eq!(
         stored_upload(&engine, &upload_id).received_bytes.len(),
-        state::MAX_LAYER_UPLOAD_BYTES,
+        state::max_layer_upload_bytes(),
         "a refused part keeps no byte, so the upload stays at the cap"
     );
 }

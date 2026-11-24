@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Fixed
+- An ECR layer upload may grow to ECR's published maximum layer size, 52,000 MiB, clipped to the registry ceiling `EMULATOR_ECR_MAX_STORED_BYTES` sets; it was capped at 128 MiB, which refused a 211 MB Node.js base layer with 413 on `docker push` (#25)
+
 ## [0.4.1] - 2026-11-24
 
 ### Added

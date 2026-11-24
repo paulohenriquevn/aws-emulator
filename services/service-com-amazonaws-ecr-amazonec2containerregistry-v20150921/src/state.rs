@@ -913,8 +913,8 @@ pub const ABANDONED_UPLOAD_AGE: Duration = Duration::from_secs(60 * 60);
 /// every stored image manifest.
 ///
 /// The per-record caps above each bound ONE dimension and their product is far larger
-/// than any host — [`MAX_LAYER_UPLOADS`] uploads of [`MAX_LAYER_UPLOAD_BYTES`] alone
-/// would be 128 GiB — so this is the aggregate the two growing paths are actually held
+/// than any host — [`MAX_LAYER_UPLOADS`] uploads of ECR's maximum layer size alone
+/// would be far more — so this is the aggregate the two growing paths are actually held
 /// to: `UploadLayerPart` and `PutImage` refuse, with the `LimitExceededException` each
 /// models, the call that would take the registry past it, and no byte of the refused
 /// payload is kept. It is a bound on THIS PROCESS's memory rather than an AWS quota (AWS
@@ -955,16 +955,27 @@ pub fn parse_registry_byte_limit(raw: Option<&str>) -> usize {
 /// that cap.
 pub const REPORTED_LAYER_PART_SIZE: i64 = 10 * 1024 * 1024;
 
+/// Amazon ECR's maximum layer size: "Layer size ... 52,000" MiB, a fixed quota in every
+/// supported Region (Amazon ECR service quotas).
+pub const ECR_MAX_LAYER_BYTES: usize = 52_000 * 1024 * 1024;
+
 /// See [`MAX_REPOSITORIES`]: the ceiling on how many bytes ONE in-flight upload
-/// accumulates. `UploadLayerPart` is the only thing that grows it — by up to 20971520
-/// bytes per call, the model's cap on `layerPartBlob` — and the bytes stay in memory
-/// until the upload is completed or the process ends, so the registry needs a ceiling
-/// on the layer a client can stream into it. Past it the part is refused with the
+/// accumulates, through `UploadLayerPart` or a registry `PATCH`/`PUT`. The bytes stay in
+/// memory until the upload is completed or the process ends, so the ceiling is ECR's
+/// maximum layer size ([`ECR_MAX_LAYER_BYTES`]) clipped to the registry-wide budget
+/// ([`max_registry_caller_bytes`]): a layer larger than everything the registry may hold
+/// could never be stored anyway. Past it the part is refused with the
 /// `LimitExceededException` `UploadLayerPart` models ("the operation did not succeed
 /// because it would have exceeded a service limit for your account") and no byte of it
-/// is kept. AWS publishes no fixed maximum layer size, so the number is this
-/// emulator's own bound, set well above any layer an ordinary push sends.
-pub const MAX_LAYER_UPLOAD_BYTES: usize = 128 * 1024 * 1024;
+/// is kept.
+pub fn max_layer_upload_bytes() -> usize {
+    layer_upload_limit(max_registry_caller_bytes())
+}
+
+/// Pure core of [`max_layer_upload_bytes`] for a given registry-wide budget.
+pub fn layer_upload_limit(registry_limit: usize) -> usize {
+    registry_limit.min(ECR_MAX_LAYER_BYTES)
+}
 
 /// See [`MAX_REPOSITORIES`]. This one bounds [`Repo::layer_blobs`], which grows by one
 /// entry per `CompleteLayerUpload` that registers a blob the repository did not already
@@ -1018,7 +1029,7 @@ pub enum LayerPartRejection {
     /// The part does not begin where the upload's received bytes end, so accepting it
     /// would leave a gap in the layer or overwrite bytes already received.
     NonConsecutivePart,
-    /// Accepting the part would take the upload past [`MAX_LAYER_UPLOAD_BYTES`].
+    /// Accepting the part would take the upload past [`max_layer_upload_bytes`].
     UploadTooLarge,
 }
 
@@ -1061,7 +1072,7 @@ impl LayerUpload {
         if part_first_byte != self.next_part_first_byte() {
             return Err(LayerPartRejection::NonConsecutivePart);
         }
-        if self.received_bytes.len().saturating_add(blob.len()) > MAX_LAYER_UPLOAD_BYTES {
+        if self.received_bytes.len().saturating_add(blob.len()) > max_layer_upload_bytes() {
             return Err(LayerPartRejection::UploadTooLarge);
         }
         self.received_bytes.extend_from_slice(blob);
@@ -2246,7 +2257,7 @@ impl Repo {
     ///
     /// [`LayerBlob::content`] is left EMPTY in the copies this answers with: every reader
     /// of it reports ON a layer — its digest, its size, its media type, its availability
-    /// — rather than serving it, and one layer runs to [`MAX_LAYER_UPLOAD_BYTES`], so
+    /// — rather than serving it, and one layer runs to [`max_layer_upload_bytes`], so
     /// copying the content per read would let one small request allocate every byte the
     /// repository holds. The download plane reads [`Self::layer_blobs`] itself.
     pub fn layers(&self) -> BTreeMap<String, LayerBlob> {
