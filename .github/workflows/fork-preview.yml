@@ -1,0 +1,96 @@
+# fork: publishes a pre-release (vX.Y.Z-rc.N) of the emulator and the EKS provisioner in
+# the time a build takes, without fork acceptance. LoopZero's staging pins it and validates
+# the change against real workloads; the final version then runs fork-acceptance.yml once.
+#
+# Run it from the branch to build, which keeps the Rust cache of that branch warm:
+#   gh workflow run fork-preview.yml --ref workspace -f version=v0.4.3-rc.1
+name: fork preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Pre-release tag to create, vX.Y.Z-rc.N
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-preview-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: The version is a pre-release tag
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] || {
+            echo "::error::version must look like v1.2.3-rc.1, got '$VERSION'"; exit 1; }
+
+      - name: Make room for the EC2 crate
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell \
+            /usr/local/share/chromium /usr/local/lib/node_modules
+          sudo docker image prune -af >/dev/null
+          sudo swapoff -a
+          sudo rm -f /swapfile /mnt/swapfile
+          sudo fallocate -l 10G /swapfile-ci
+          sudo chmod 600 /swapfile-ci
+          sudo mkswap /swapfile-ci
+          sudo swapon /swapfile-ci
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          cache-on-failure: true
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fork/console/web/package-lock.json
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: fork/eks-provisioner/go.mod
+          cache-dependency-path: fork/eks-provisioner/go.sum
+
+      # The router embeds the built console (fork/console/build.rs), so it is built first, as
+      # in fork acceptance.
+      - name: Build the console
+        working-directory: fork/console/web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build the emulator
+        run: cargo build -p aws-emulator-fork-router
+
+      - name: Build the provisioner
+        working-directory: fork/eks-provisioner
+        run: CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$RUNNER_TEMP/eks-provisioner" .
+
+      - name: Publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir dist
+          cp target/debug/aws-emulator-fork dist/aws-emulator-fork-linux-x64
+          cp "$RUNNER_TEMP/eks-provisioner" dist/eks-provisioner-linux-x64
+          cd dist
+          for f in aws-emulator-fork-linux-x64 eks-provisioner-linux-x64; do sha256sum "$f" >"$f.sha256"; done
+          printf 'Pre-release of %s, built without fork acceptance, for validation on staging.\n' \
+            "$GITHUB_SHA" >notes.md
+          gh release create "$VERSION" ./*-linux-x64 ./*-linux-x64.sha256 \
+            --target "$GITHUB_SHA" --prerelease --title "$VERSION" --notes-file notes.md
