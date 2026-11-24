@@ -368,7 +368,7 @@ async fn the_upload_past_the_cap_is_refused() {
 
 /// The caller-supplied bytes this registry holds: every in-flight upload's received
 /// bytes plus every stored image manifest, bounded together by
-/// [`state::MAX_REGISTRY_CALLER_BYTES`].
+/// [`state::max_registry_caller_bytes`].
 fn held_bytes(engine: &Arc<engine::InMemoryEngine>) -> usize {
     state::service_state(&**engine)
         .expect("the ecr store is reachable from the engine the router was built over")
@@ -411,7 +411,7 @@ async fn upload_part(
 /// The bytes a client can make this registry retain are bounded in AGGREGATE, not just
 /// per record: the rule under test is that the registry accounts for every in-flight
 /// upload's received bytes and every stored manifest against one budget
-/// ([`state::MAX_REGISTRY_CALLER_BYTES`]), and that an upload nobody completed is
+/// ([`state::max_registry_caller_bytes`]), and that an upload nobody completed is
 /// reclaimed once the registry needs its slot rather than pinning it for the life of the
 /// process.
 ///
@@ -484,20 +484,20 @@ async fn the_registry_bounds_the_caller_bytes_it_retains() {
 
     // The boundary itself: the registry takes what still fits under the budget and
     // refuses the byte past it.
-    let room = state::MAX_REGISTRY_CALLER_BYTES - expected_bytes;
+    let room = state::max_registry_caller_bytes() - expected_bytes;
     for (case, additional, fits) in [
         ("nothing", 0_usize, true),
         ("one byte", 1, true),
         ("exactly the room left", room, true),
         ("one byte past the room left", room + 1, false),
-        ("the whole budget again", state::MAX_REGISTRY_CALLER_BYTES, false),
+        ("the whole budget again", state::max_registry_caller_bytes(), false),
     ] {
         assert_eq!(
             has_budget_for(&engine, additional),
             fits,
             "case {case:?}: with {expected_bytes} bytes held of \
              {} the registry must {}take {additional} more",
-            state::MAX_REGISTRY_CALLER_BYTES,
+            state::max_registry_caller_bytes(),
             if fits { "" } else { "not " }
         );
     }

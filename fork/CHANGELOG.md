@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Added
+- `EMULATOR_ECR_MAX_STORED_BYTES` raises the 512 MiB ceiling on the bytes the ECR registry holds (in-flight uploads, layer blobs and manifests together), so a deployment that hosts real images can store them; a full Node.js image with its registry cache did not fit (#25)
+
 ## [0.4.0] - 2026-11-23
 
 ### Added

@@ -470,7 +470,7 @@ pub struct LayerBlob {
     ///
     /// A layer is content-addressed, so the bytes ARE the layer: a registry that reports
     /// a layer available and hands out a download URL for it has to still hold them.
-    /// They count against [`MAX_REGISTRY_CALLER_BYTES`]
+    /// They count against [`max_registry_caller_bytes`]
     /// ([`caller_bytes_held`](ComAmazonawsEcrAmazonec2containerregistryV20150921State::caller_bytes_held)),
     /// where they are the same bytes the completed upload held, so closing an upload
     /// moves a layer's bytes between two records rather than freeing the budget they sit
@@ -918,8 +918,32 @@ pub const ABANDONED_UPLOAD_AGE: Duration = Duration::from_secs(60 * 60);
 /// to: `UploadLayerPart` and `PutImage` refuse, with the `LimitExceededException` each
 /// models, the call that would take the registry past it, and no byte of the refused
 /// payload is kept. It is a bound on THIS PROCESS's memory rather than an AWS quota (AWS
-/// publishes none), set well above the bytes any ordinary push or test sends.
-pub const MAX_REGISTRY_CALLER_BYTES: usize = 512 * 1024 * 1024;
+/// publishes none), set well above the bytes any ordinary push or test sends. A
+/// deployment that hosts real images raises it with [`MAX_REGISTRY_CALLER_BYTES_ENV`]
+/// ([`max_registry_caller_bytes`]).
+pub const DEFAULT_MAX_REGISTRY_CALLER_BYTES: usize = 512 * 1024 * 1024;
+
+/// The environment variable that sets the registry-wide byte ceiling, in bytes.
+pub const MAX_REGISTRY_CALLER_BYTES_ENV: &str = "EMULATOR_ECR_MAX_STORED_BYTES";
+
+/// The registry-wide byte ceiling: [`MAX_REGISTRY_CALLER_BYTES_ENV`], or
+/// [`DEFAULT_MAX_REGISTRY_CALLER_BYTES`] when it is unset, unparseable or zero. Read
+/// once per process.
+pub fn max_registry_caller_bytes() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        parse_registry_byte_limit(std::env::var(MAX_REGISTRY_CALLER_BYTES_ENV).ok().as_deref())
+    })
+}
+
+/// Pure core of the registry byte ceiling: the parsed value, or
+/// [`DEFAULT_MAX_REGISTRY_CALLER_BYTES`] for an absent, unparseable or zero value.
+pub fn parse_registry_byte_limit(raw: Option<&str>) -> usize {
+    match raw.map(|value| value.trim().parse::<usize>()) {
+        Some(Ok(limit)) if limit > 0 => limit,
+        _ => DEFAULT_MAX_REGISTRY_CALLER_BYTES,
+    }
+}
 
 /// The `partSize` `InitiateLayerUpload` reports: the size ECR tells the client to send
 /// future layer parts in.
@@ -2775,7 +2799,7 @@ impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
     /// received bytes, every registered layer blob's bytes, and every stored image
     /// manifest.
     ///
-    /// The one accounting behind [`MAX_REGISTRY_CALLER_BYTES`], so the two paths that
+    /// The one accounting behind [`max_registry_caller_bytes`], so the two paths that
     /// grow the store — `UploadLayerPart` and `PutImage` — are held to one aggregate
     /// rather than to their own per-record caps alone. A registered blob's bytes are
     /// counted here as well as an in-flight upload's ([`LayerBlob::content`]): closing an
@@ -2803,10 +2827,10 @@ impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
     }
 
     /// Whether `additional` more caller-supplied bytes fit under
-    /// [`MAX_REGISTRY_CALLER_BYTES`]. A caller that asks for more is refused before any
+    /// [`max_registry_caller_bytes`]. A caller that asks for more is refused before any
     /// byte of its payload is stored.
     pub fn has_byte_budget_for(&self, additional: usize) -> bool {
-        self.caller_bytes_held().saturating_add(additional) <= MAX_REGISTRY_CALLER_BYTES
+        self.caller_bytes_held().saturating_add(additional) <= max_registry_caller_bytes()
     }
 
     /// How many basic image scans this registry has started within `interval` of `now`:

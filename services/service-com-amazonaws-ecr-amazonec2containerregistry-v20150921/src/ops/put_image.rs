@@ -320,13 +320,13 @@ fn refusal_error(refusal: crate::state::ImagePushRefusal) -> PutImageError {
             })
         }
         // The registry-wide budget the bytes of every stored manifest and every in-flight
-        // upload share. See [`crate::state::MAX_REGISTRY_CALLER_BYTES`].
+        // upload share. See [`crate::state::max_registry_caller_bytes`].
         Refusal::ByteBudgetExhausted => {
             PutImageErrorModeled::LimitExceededException(LimitExceededException {
                 message: Some(format!(
                     "this registry holds at most {} bytes of stored image manifests \
                      and in-flight layer uploads together",
-                    crate::state::MAX_REGISTRY_CALLER_BYTES
+                    crate::state::max_registry_caller_bytes()
                 )),
             })
         }

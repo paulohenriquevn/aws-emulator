@@ -89,6 +89,8 @@ mod published_registry_address;
 mod refusal_message_sources;
 #[path = "all/refusal_wording.rs"]
 mod refusal_wording;
+#[path = "all/registry_byte_limit.rs"]
+mod registry_byte_limit;
 #[path = "all/registry_policy.rs"]
 mod registry_policy;
 #[path = "all/registry_replication_configuration.rs"]
