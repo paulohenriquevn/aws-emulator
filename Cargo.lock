@@ -442,6 +442,7 @@ dependencies = [
 name = "aws-emulator-fork-router"
 version = "0.1.0"
 dependencies = [
+ "aws-credential-types",
  "aws-emulator-emulator-telemetry",
  "aws-emulator-engine",
  "aws-emulator-fork-access-log",
@@ -451,6 +452,7 @@ dependencies = [
  "aws-emulator-fork-service-account-issuers",
  "aws-emulator-server",
  "aws-emulator-smithy-server-runtime",
+ "aws-sigv4",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "axum 0.8.9",
@@ -464,6 +466,7 @@ dependencies = [
  "service-com-amazonaws-budgets-awsbudgetservicegateway",
  "service-com-amazonaws-cloudformation-cloudformation",
  "service-com-amazonaws-cloudfront-cloudfront2020-05-31",
+ "service-com-amazonaws-cloudfrontkeyvaluestore-cloudfrontkeyvaluestore",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
  "service-com-amazonaws-cloudwatchlogs-logs-20140328",
  "service-com-amazonaws-ec2-amazonec2",

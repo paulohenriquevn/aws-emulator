@@ -19,6 +19,8 @@ service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
 # front door that hands an ELBv2 request (Version 2015-12-01) to the ELBv2 model.
 service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7
 service-com-amazonaws-cloudfront-cloudfront2020-05-31
+# LoopZero publishes its host-to-cell routes to a key value store that a CloudFront Function reads.
+service-com-amazonaws-cloudfrontkeyvaluestore-cloudfrontkeyvaluestore
 service-com-amazonaws-wafv2-awswaf-20190729
 service-com-amazonaws-acm-certificatemanager
 service-com-amazonaws-route53-awsdnsv20130401

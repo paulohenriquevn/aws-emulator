@@ -43,6 +43,7 @@ service-com-amazonaws-eks-awswesleyfrontend = { workspace = true }
 service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10 = { workspace = true }
 service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7 = { workspace = true }
 service-com-amazonaws-cloudfront-cloudfront2020-05-31 = { workspace = true }
+service-com-amazonaws-cloudfrontkeyvaluestore-cloudfrontkeyvaluestore = { workspace = true }
 service-com-amazonaws-wafv2-awswaf-20190729 = { workspace = true }
 service-com-amazonaws-acm-certificatemanager = { workspace = true }
 service-com-amazonaws-route53-awsdnsv20130401 = { workspace = true }
@@ -62,6 +63,9 @@ axum = "0.8"
 rustls = { workspace = true }
 serde_json = { workspace = true }
 ring = "0.17"
+# The CloudFront KeyValueStore test signs its data plane calls with SigV4A, as SDKs do.
+aws-sigv4 = { workspace = true, features = ["sigv4a"] }
+aws-credential-types = { workspace = true }
 
 [lints]
 workspace = true

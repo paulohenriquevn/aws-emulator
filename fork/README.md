@@ -8,7 +8,7 @@ account. Everything the fork adds lives in this directory, plus a few patches in
 
 | Path | What |
 |---|---|
-| `services.txt` | The 28 AWS service crates the router mounts. The upstream router builds every service and needs about 100 GB of build output; ours builds only these. |
+| `services.txt` | The 29 AWS service crates the router mounts. The upstream router builds every service and needs about 100 GB of build output; ours builds only these. |
 | `render_router.py` | Generates `router/` from `services.txt`. `--check` fails when the generated files are stale. |
 | `router/` | The slim router crate. Its binary is `aws-emulator-fork`. |
 | `console/` | The read-only web console the binary serves at `/_console/`: a React app in `console/web` and the crate that embeds its build. |
@@ -430,6 +430,7 @@ upstream ships the fix.
 | TLS | The certificate covers `000000000000.localhost`, the host S3 Control dials | aws/aws-emulator#56 |
 | STS | A presigned `GetCallerIdentity`, an EKS token's request, is valid for 15 minutes from `X-Amz-Date` whatever its `X-Amz-Expires`, as STS accepts it (`vendor/server/src/request_authentication.rs`) | not reported yet |
 | RDS (and core listeners) | An instance created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves it, so `Endpoint.Port` matches it | aws/aws-emulator#537 |
+| Core server | A request signed with SigV4A (`AWS4-ECDSA-P256-SHA256`) is verified against the public key of its credential, and its access key is the caller's (`vendor/server/src/request_authentication_sigv4a.rs`, `extract_akid` in `vendor/server/src/lib.rs`) | not reported yet |
 | Core router | `MultiServiceRouter` runs an installed `RequestAuthorizer` after request authentication (`vendor/smithy-server-runtime/src/multi_service_router.rs`), which `iam-gate/` installs | not reported yet |
 | ElastiCache | `DeleteReplicationGroup` is implemented | aws/aws-emulator#355 |
 | STS | `AssumeRoleWithWebIdentity` verifies tokens against a service account key set registered for an EKS cluster's issuer | not reported yet |

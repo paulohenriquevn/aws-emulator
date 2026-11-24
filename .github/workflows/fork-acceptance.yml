@@ -226,6 +226,15 @@ jobs:
           -p aws-emulator-fork-iam-gate
           -p aws-emulator-fork-router --test iam_enforcement
 
+      - name: A CloudFront key value store is read and written over SigV4A
+        # vendor/server is outside the workspace, so its unit tests build on their own,
+        # pinned to the workspace's lockfile.
+        run: |
+          cp Cargo.lock vendor/server/Cargo.lock
+          CARGO_TARGET_DIR=target cargo test --manifest-path vendor/server/Cargo.toml --lib -- request_authentication extract_akid
+          rm vendor/server/Cargo.lock
+          cargo test -p aws-emulator-fork-router --test cloudfront_key_value_store
+
       - name: Unit tests of the workload identity patches
         run: >-
           cargo test --lib

@@ -87,6 +87,9 @@ axum = "0.8"
 rustls = {{ workspace = true }}
 serde_json = {{ workspace = true }}
 ring = "0.17"
+# The CloudFront KeyValueStore test signs its data plane calls with SigV4A, as SDKs do.
+aws-sigv4 = {{ workspace = true, features = ["sigv4a"] }}
+aws-credential-types = {{ workspace = true }}
 
 [lints]
 workspace = true

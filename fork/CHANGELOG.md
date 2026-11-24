@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Added
+- The CloudFront KeyValueStore data plane (`cloudfront-keyvaluestore`) is mounted: `DescribeKeyValueStore`, `GetKey`, `PutKey` with its `If-Match` check, `DeleteKey`, `UpdateKeys` and `ListKeys` serve the stores CloudFront `CreateKeyValueStore` creates, so an SDK or the AWS CLI can read and write keys a CloudFront Function reads
+- With `--auth on`, a request signed with SigV4A (`AWS4-ECDSA-P256-SHA256`), as SDKs sign the KeyValueStore data plane, is accepted when its signature verifies against the emulator's keys or a credential it created, and refused as a bad SigV4 signature is otherwise. Presigned SigV4A URLs are still refused
+
 ## [0.4.2] - 2026-11-24
 
 ### Fixed
