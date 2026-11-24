@@ -121,7 +121,7 @@ pub enum ImagePushRefusal {
     /// No repository of that name; carries the fault `PutImage` renders.
     RepositoryNotFound(String),
     /// Storing the manifest would take the registry past
-    /// [`super::MAX_REGISTRY_CALLER_BYTES`].
+    /// [`super::max_registry_caller_bytes`].
     ByteBudgetExhausted,
     /// The manifest references blobs the repository does not hold, named in order.
     LayersNotFound {
