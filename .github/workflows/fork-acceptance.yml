@@ -22,8 +22,7 @@ on:
 
 permissions:
   contents: read
-  # The kubernetes job reads another run's emulator binary when emulator-run-id is set.
-  actions: read
+  actions: read # the kubernetes job reads another run's emulator binary (emulator-run-id)
 
 concurrency:
   group: acceptance-${{ github.ref }}
@@ -42,6 +41,7 @@ env:
 
 jobs:
   tested-tree:
+    name: tested-tree
     # Finds a run that already passed every job on this git tree (fork/ci/find-tested-run.sh),
     # leaving fork/CHANGELOG.md out of the tree (fork/ci/tested-tree.sh).
     # A promotion into main and its version tag carry the tree the pull request into develop
@@ -53,6 +53,9 @@ jobs:
       run-id: ${{ steps.lookup.outputs.run-id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
       - name: Tests of the tested-run lookup
         run: |
@@ -76,6 +79,7 @@ jobs:
           fi
 
   acceptance:
+    name: acceptance
     needs: tested-tree
     if: ${{ !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
     runs-on: ubuntu-latest
@@ -102,10 +106,17 @@ jobs:
           df -h
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: Install the stable Rust toolchain
+        # rustup is on the runner image; this is what dtolnay/rust-toolchain@stable ran.
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
 
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2 # zizmor: ignore[cache-poisoning] caches are written only by this workflow on PR and tag refs, which GitHub scopes apart
         with:
           # A red run still keeps the compiled EC2 crate for the next one.
           cache-on-failure: true
@@ -115,7 +126,7 @@ jobs:
           terraform_version: 1.16.4
           terraform_wrapper: false
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 # zizmor: ignore[cache-poisoning] caches are written only by this workflow on PR and tag refs, which GitHub scopes apart
         with:
           node-version: 22
           cache: npm
@@ -290,6 +301,7 @@ jobs:
           if-no-files-found: ignore
 
   kubernetes:
+    name: kubernetes
     # Real controllers and real workload identity in a kind cluster that signs as the
     # emulator's EKS cluster (fork/kubernetes/run.sh), on the binary the acceptance job built.
     needs: [tested-tree, acceptance]
@@ -298,6 +310,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
       - name: Install kind
         run: |
@@ -340,6 +355,7 @@ jobs:
           if-no-files-found: ignore
 
   eks-provisioner:
+    name: eks-provisioner
     # EKS clusters whose control plane and nodes the provisioner runs in kind, created and
     # reached through the EKS API alone (fork/eks-provisioner/e2e.sh), on the binary the
     # acceptance job built.
@@ -349,9 +365,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
-      # The copy of the pod identity webhook image below.
-      packages: write
+      actions: read # the emulator binary the acceptance job, or an earlier run, built
+      packages: write # the copy of the pod identity webhook image below
     env:
       # ECR Public answers the shared addresses of GitHub's runners with 429 "Data limit
       # exceeded", so the clusters here run a copy of the webhook image on GHCR: the same
@@ -361,8 +376,11 @@ jobs:
       WEBHOOK_COPY: ghcr.io/${{ github.repository_owner }}/amazon-eks-pod-identity-webhook
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 # zizmor: ignore[cache-poisoning] caches are written only by this workflow on PR and tag refs, which GitHub scopes apart
         with:
           go-version-file: fork/eks-provisioner/go.mod
           cache-dependency-path: fork/eks-provisioner/go.sum
@@ -435,6 +453,7 @@ jobs:
           if-no-files-found: ignore
 
   mark-tested:
+    name: mark-tested
     # Records that every job passed on this tree, for tested-tree in later runs. It keeps as
     # long as the emulator binary it vouches for.
     needs: [tested-tree, acceptance, kubernetes, eks-provisioner]
@@ -443,7 +462,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Write the marker
-        run: echo "${{ needs.tested-tree.outputs.tree }}" >"$RUNNER_TEMP/tested-tree"
+        env:
+          TREE: ${{ needs.tested-tree.outputs.tree }}
+        run: echo "$TREE" >"$RUNNER_TEMP/tested-tree"
 
       - name: Keep the marker
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -453,6 +474,7 @@ jobs:
           retention-days: 7
 
   release:
+    name: release
     # Publishes, for a version tag, the emulator binary that passed every job, with its
     # SHA-256, on the GitHub release of that tag. The binaries come from this run, or from the
     # earlier run that tested the same tree. The notes are the version's section of
@@ -465,11 +487,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
-      # The binaries of an earlier run.
-      actions: read
+      contents: write # creates the GitHub release and uploads its binaries
+      actions: read # the binaries of an earlier run
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
       - name: Fetch the tested emulator binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
