@@ -91,8 +91,9 @@
 //! addressings, and each one is checked against this service's own records, so one
 //! request still has one claimant:
 //!
-//! * HOST-STYLE: the host is a distribution's `DomainName` or one of its `Aliases`, and
-//!   the whole path is the viewer path;
+//! * HOST-STYLE: the host is a distribution's `DomainName` or one of its `Aliases` (a
+//!   wildcard alias covering one label, an exact name winning over a wildcard), and the
+//!   whole path is the viewer path;
 //! * PREFIXED PATH-STYLE: `/_aws/cloudfront/{distribution-id}/{viewer-path}`, read on
 //!   whatever host it arrives at — the reserved first segment is in no service's modelled
 //!   path space;
@@ -295,11 +296,7 @@ fn resolve<'s, 'r>(
     addressed: &Addressed<'r>,
 ) -> Option<Resolved<'s, 'r>> {
     if let Some(host) = addressed.host {
-        if let Some(distribution) = store
-            .distributions
-            .values()
-            .find(|distribution| serves_host(distribution, host))
-        {
+        if let Some(distribution) = distribution_serving_host(store, host) {
             return Some(Resolved {
                 distribution,
                 viewer_path: addressed.path,
@@ -333,20 +330,68 @@ fn resolve<'s, 'r>(
     store
         .distributions
         .get(first)
-        .or_else(|| {
-            store
-                .distributions
-                .values()
-                .find(|distribution| serves_host(distribution, first))
-        })
+        .or_else(|| distribution_serving_host(store, first))
         .map(|distribution| Resolved {
             distribution,
             viewer_path: rest,
         })
 }
 
-/// Whether `host` is a domain name this distribution is served on: the `DomainName`
-/// CloudFront assigned it, or one of the alternate domain names its `Aliases` carry.
+/// The distribution `host` is a domain name of, by the most specific name that matches it.
+///
+/// fork: "If you have overlapping alternate domain names in two distributions, CloudFront
+/// sends the request to the distribution with the more specific name match ... For example,
+/// marketing.domain.com is more specific than *.domain.com." So a distribution that names
+/// the host exactly is chosen over one whose wildcard alias covers it, whichever the store
+/// lists first.
+fn distribution_serving_host<'s>(
+    store: &'s ComAmazonawsCloudfrontCloudfront20200531State,
+    host: &str,
+) -> Option<&'s StoredDistribution> {
+    store
+        .distributions
+        .values()
+        .filter_map(|distribution| host_match(distribution, host).map(|matched| (matched, distribution)))
+        .fold(None, |best: Option<(AliasMatch, &StoredDistribution)>, candidate| match best {
+            Some(held) if held.0 >= candidate.0 => Some(held),
+            _ => Some(candidate),
+        })
+        .map(|(_, distribution)| distribution)
+}
+
+/// Whether `host` is a domain name this distribution is served on ([`host_match`]).
+fn serves_host(distribution: &StoredDistribution, host: &str) -> bool {
+    host_match(distribution, host).is_some()
+}
+
+/// fork: how an alternate domain name matches a host: naming it exactly, or as a wildcard.
+/// An exact match is the more specific, so it orders above a wildcard one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AliasMatch {
+    /// `*.example.com` covering `a.example.com`.
+    Wildcard,
+    /// The name itself, or the `DomainName` CloudFront assigned.
+    Exact,
+}
+
+/// fork: how `alias` matches `host` (a host without its port), or `None` when it does not.
+///
+/// A wildcard alias is `*` as the whole first label, and it covers exactly one label in
+/// its place: `*.example.com` covers `marketing.example.com`, but not `example.com` nor
+/// `marketing.product.example.com`, which are "at levels higher or lower than the
+/// wildcard". DNS names compare case-insensitively ([`same_domain`]).
+fn alias_match(alias: &str, host: &str) -> Option<AliasMatch> {
+    if same_domain(alias, host) {
+        return Some(AliasMatch::Exact);
+    }
+    let parent = alias.strip_prefix("*.")?;
+    let (label, rest) = host.split_once('.')?;
+    (!label.is_empty() && same_domain(parent, rest)).then_some(AliasMatch::Wildcard)
+}
+
+/// How `host` is a domain name this distribution is served on, or `None` when it is not
+/// one: the `DomainName` CloudFront assigned it, or one of the alternate domain names its
+/// `Aliases` carry, exactly or by a wildcard ([`alias_match`]).
 ///
 /// DNS names are case-insensitive, so the comparison is ([`same_domain`]). A multi-tenant
 /// distribution reports no domain of its own and so is served on none: its viewers reach
@@ -366,23 +411,25 @@ fn resolve<'s, 'r>(
 /// client on this machine dials ([`addressable_alias`]). The domain CloudFront itself
 /// assigned is never such a name, and a distribution whose alias is one is still reachable
 /// through the reserved data-plane path.
-fn serves_host(distribution: &StoredDistribution, host: &str) -> bool {
+fn host_match(distribution: &StoredDistribution, host: &str) -> Option<AliasMatch> {
     if same_domain(&distribution.domain_name, host) {
-        return true;
+        return Some(AliasMatch::Exact);
     }
     let host = bare_host(host);
     if same_domain(&distribution.domain_name, host) {
-        return true;
+        return Some(AliasMatch::Exact);
     }
     if !addressable_alias(host) {
-        return false;
+        return None;
     }
     distribution
         .config
         .aliases
         .as_ref()
-        .and_then(|aliases| aliases.items.as_ref())
-        .is_some_and(|aliases| aliases.iter().any(|alias| same_domain(alias, host)))
+        .and_then(|aliases| aliases.items.as_ref())?
+        .iter()
+        .filter_map(|alias| alias_match(alias, host))
+        .max()
 }
 
 /// Whether `host` is a name an alternate domain name may claim: a customer domain, rather
@@ -2387,6 +2434,32 @@ mod tests {
                     && headers.iter().any(|(name, _)| name == X_AMZ_CF_ID),
                 "case {case:?}: expected the origin's host and an X-Amz-Cf-Id, got \
                  {headers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alias_matches_a_host_exactly_or_by_one_wildcard_label() {
+        // Rows differ along the alias form (exact, wildcard), the depth of the host under
+        // a wildcard's parent (none, one label, two labels), letter case, and an asterisk
+        // anywhere but a whole first label.
+        let cases: [(&str, &str, &str, Option<AliasMatch>); 9] = [
+            ("an exact alias", "www.example.com", "www.example.com", Some(AliasMatch::Exact)),
+            ("an exact alias in other case", "www.example.com", "WWW.Example.com", Some(AliasMatch::Exact)),
+            ("one label under a wildcard", "*.example.com", "a.example.com", Some(AliasMatch::Wildcard)),
+            ("one label under a wildcard in other case", "*.example.com", "A.EXAMPLE.com", Some(AliasMatch::Wildcard)),
+            ("two labels under a wildcard", "*.example.com", "a.b.example.com", None),
+            ("the wildcard's parent itself", "*.example.com", "example.com", None),
+            ("an empty label under a wildcard", "*.example.com", ".example.com", None),
+            ("an asterisk inside a label", "a*.example.com", "ab.example.com", None),
+            ("a different name", "www.example.com", "api.example.com", None),
+        ];
+        for (case, alias, host, expected) in cases {
+            let actual = alias_match(alias, host);
+            assert_eq!(
+                actual, expected,
+                "case {case:?} (alias {alias:?}, host {host:?}): expected {expected:?}, got \
+                 {actual:?}"
             );
         }
     }

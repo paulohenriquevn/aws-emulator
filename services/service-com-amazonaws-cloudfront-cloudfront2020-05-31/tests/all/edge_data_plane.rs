@@ -592,6 +592,69 @@ async fn a_caller_supplied_alias_cannot_claim_the_emulators_own_endpoint() {
     }
 }
 
+/// A distribution is claimed by the alternate domain names it carries: a wildcard alias
+/// claims a host exactly one label under it, and where an exact alias of another
+/// distribution names the same host, the more specific name wins ("CloudFront sends the
+/// request to the distribution with the more specific name match"), whichever distribution
+/// was created first.
+///
+/// The wildcard's distribution fetches an origin this emulator serves (`200`); the exact
+/// one an origin it does not (`502`), so the status says which distribution answered.
+#[tokio::test]
+async fn a_wildcard_alias_claims_one_label_and_an_exact_alias_wins_over_it() {
+    let router = emulator();
+    let aliased = |caller_reference: &str, origin: &str, alias: &str| {
+        config(caller_reference, origin, CACHING_DISABLED)
+            .replace(
+                &format!("<CallerReference>{caller_reference}</CallerReference>"),
+                &format!(
+                    "<CallerReference>{caller_reference}</CallerReference>\
+                     <Aliases><Quantity>1</Quantity><Items><CNAME>{alias}</CNAME></Items></Aliases>"
+                ),
+            )
+            .replace(
+                "<Enabled>true</Enabled>",
+                "<Enabled>true</Enabled><ViewerCertificate>\
+                 <ACMCertificateArn>arn:aws:acm:us-east-1:000000000000:certificate/edge</ACMCertificateArn>\
+                 <SSLSupportMethod>sni-only</SSLSupportMethod>\
+                 <MinimumProtocolVersion>TLSv1.2_2021</MinimumProtocolVersion></ViewerCertificate>",
+            )
+    };
+    for (reference, origin, alias) in [
+        ("edge-wildcard", SERVED_ORIGIN, "*.apps.example.com"),
+        ("edge-exact", UNSERVED_ORIGIN, "www.apps.example.com"),
+    ] {
+        let created = create_distribution(&router, &aliased(reference, origin, alias)).await;
+        assert_eq!(
+            created.status, 201,
+            "creating the distribution aliased {alias} answered {}: {}",
+            created.status, created.raw
+        );
+    }
+    ::tokio::time::sleep(past_propagation()).await;
+
+    // (case, the host the request is addressed to, the edge's answer or None when the
+    // edge does not serve the request)
+    let cases: [(&str, &str, Option<u16>); 6] = [
+        ("one label under the wildcard", "x.apps.example.com", Some(200)),
+        ("one label under the wildcard, with a port", "X.Apps.example.com:443", Some(200)),
+        ("the exact alias under the wildcard", "www.apps.example.com", Some(502)),
+        ("two labels under the wildcard", "a.x.apps.example.com", None),
+        ("the wildcard's parent", "apps.example.com", None),
+        ("a host no alias names", "x.example.com", None),
+    ];
+    for (case, host, expected) in cases {
+        let answer = view(&router, "GET", host, SERVED_PATH).await;
+        let actual = (!answer.x_cache.is_empty()).then_some(answer.status);
+        assert_eq!(
+            actual, expected,
+            "case {case:?} ({host}): expected the edge's answer {expected:?}, got status {} \
+             with X-Cache {:?}",
+            answer.status, answer.x_cache
+        );
+    }
+}
+
 /// The cache key carries the headers the behaviour's cache policy names, so two requests
 /// that differ in such a header are different objects to the edge and neither is served
 /// the other's answer.

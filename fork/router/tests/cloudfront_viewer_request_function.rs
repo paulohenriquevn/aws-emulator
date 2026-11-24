@@ -301,9 +301,26 @@ async fn published_function(router: &Router, name: &str, code: &str, store_arn: 
 /// viewer header but `Host` and the query string (`AllViewerExceptHostHeader`), as an app
 /// router's does: without an origin request policy CloudFront forwards no query string.
 async fn distribution(router: &Router, reference: &str, function_arn: &str) -> String {
+    distribution_aliased(router, reference, function_arn, None).await
+}
+
+/// [`distribution`], carrying `alias` as its one alternate domain name when given, under
+/// the ACM certificate an alternate domain name needs.
+async fn distribution_aliased(router: &Router, reference: &str, function_arn: &str, alias: Option<&str>) -> String {
+    let (aliases, certificate) = match alias {
+        Some(alias) => (
+            format!("<Aliases><Quantity>1</Quantity><Items><CNAME>{alias}</CNAME></Items></Aliases>"),
+            "<ViewerCertificate>\
+             <ACMCertificateArn>arn:aws:acm:us-east-1:000000000000:certificate/apps</ACMCertificateArn>\
+             <SSLSupportMethod>sni-only</SSLSupportMethod>\
+             <MinimumProtocolVersion>TLSv1.2_2021</MinimumProtocolVersion></ViewerCertificate>"
+                .to_string(),
+        ),
+        None => (String::new(), String::new()),
+    };
     let body = format!(
         "<DistributionConfig xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">\
-         <CallerReference>{reference}</CallerReference>\
+         <CallerReference>{reference}</CallerReference>{aliases}\
          <Origins><Quantity>1</Quantity><Items><Origin>\
          <Id>cells</Id><DomainName>cells.example.com</DomainName>\
          <CustomOriginConfig><HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>\
@@ -317,7 +334,7 @@ async fn distribution(router: &Router, reference: &str, function_arn: &str) -> S
          <FunctionARN>{function_arn}</FunctionARN><EventType>viewer-request</EventType>\
          </FunctionAssociation></Items></FunctionAssociations>\
          </DefaultCacheBehavior>\
-         <Comment>tenant apps</Comment><PriceClass>PriceClass_All</PriceClass><Enabled>true</Enabled>\
+         <Comment>tenant apps</Comment><PriceClass>PriceClass_All</PriceClass><Enabled>true</Enabled>{certificate}\
          </DistributionConfig>"
     );
     let headers = [("content-type", "application/xml")];
@@ -333,6 +350,19 @@ async fn distribution(router: &Router, reference: &str, function_arn: &str) -> S
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     panic!("the distribution {id} did not deploy");
+}
+
+/// One viewer request, unsigned, with `host` as its `Host` and `path` as its path, sent to
+/// the emulator endpoint as a reverse proxy in front of it forwards one: the viewer's host
+/// kept, nothing naming the distribution but that host.
+async fn view_by_host(router: &Router, host: &str, path: &str) -> Reply {
+    let request = http::Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("host", host)
+        .body(Bytes::new())
+        .expect("a well-formed request");
+    send(router, request).await
 }
 
 /// One viewer request, unsigned, with `host` as its `Host`, addressed to the distribution's
@@ -364,6 +394,34 @@ fn the_function_sends_a_tenant_host_to_its_cell_with_the_internal_host() {
             let seen = routed.text.to_ascii_lowercase();
             assert!(seen.starts_with("get /dashboard?tab=1 "), "the target saw {seen}");
             assert!(seen.contains("\r\nhost: x.example.com\r\n"), "the target saw {seen}");
+        })
+    });
+}
+
+#[test]
+fn a_wildcard_alias_reaches_the_function_with_the_viewers_host() {
+    // The staging edge terminates TLS for *.apps.<domain> and forwards to the emulator
+    // endpoint with the viewer's Host kept: the distribution is found by its wildcard alias,
+    // and the function routes by the host the viewer addressed.
+    on_authenticating_router(|router, engine| {
+        Box::pin(async move {
+            let target = echo_server().await;
+            let cell = cell_load_balancer(&router, &engine, target).await;
+            let store = create_key_value_store(&router, "aliased-routes").await;
+            put_key(&router, &store, "route:x", r#"{"cellId":"cell-0"}"#).await;
+            put_key(&router, &store, "origin:cell-0", &cell).await;
+            let function = published_function(&router, "app-router-aliased", APP_ROUTER, Some(&store)).await;
+            distribution_aliased(&router, "tenant-apps-aliased", &function, Some("*.apps.example.com")).await;
+
+            let routed = view_by_host(&router, "x.apps.example.com", "/dashboard?tab=1").await;
+            assert_eq!(routed.status, 200, "x-cache {:?}: {}", routed.header("x-cache"), routed.text);
+            let seen = routed.text.to_ascii_lowercase();
+            assert!(seen.starts_with("get /dashboard?tab=1 "), "the target saw {seen}");
+            assert!(seen.contains("\r\nhost: x.example.com\r\n"), "the target saw {seen}");
+
+            // Two labels under the wildcard are no name of the distribution.
+            let deeper = view_by_host(&router, "a.x.apps.example.com", "/").await;
+            assert_eq!(deeper.header("x-cache"), "", "the edge served {}: {}", deeper.status, deeper.text);
         })
     });
 }
