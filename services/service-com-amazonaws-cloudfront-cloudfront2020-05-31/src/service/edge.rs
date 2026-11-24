@@ -32,6 +32,9 @@
 //! 4. that behaviour's `AllowedMethods` decide whether the viewer's METHOD is served at
 //!    all. A method the behaviour does not allow is refused BY CLOUDFRONT with `403` and
 //!    `X-Cache: Error from cloudfront`, and no origin request is made;
+//! 4a. fork: the behaviour's VIEWER-REQUEST function, when it associates one, runs over the
+//!    request and decides what follows: a response it returns is served, and a request it
+//!    returns goes on to the steps below with its changes ([`viewer_request`]);
 //! 5. that behaviour's `CachedMethods` and cache policy decide whether the answer may
 //!    come from the edge cache: a cacheable method whose TTL has not run out is answered
 //!    `X-Cache: Hit from cloudfront` without touching the origin, and everything else
@@ -115,6 +118,8 @@ pub mod forwarding;
 /// The `CloudFront-*` request headers the edge generates itself, and the viewer-stated ones
 /// it drops.
 pub mod generated_headers;
+/// fork: the viewer-request CloudFront Function a behaviour associates.
+pub mod viewer_request;
 
 use aws_smithy_runtime_api::client::http::HttpConnector;
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse, StatusCode};
@@ -125,7 +130,11 @@ use std::time::{Duration, Instant, SystemTime};
 use super::edge_metrics;
 use super::origin_access::{self, OriginAccess};
 use compression::Encoding;
-use crate::ops::types::{AllowedMethods, CacheBehavior, DefaultCacheBehavior, Origin};
+use crate::ops::types::{
+    AllowedMethods, CacheBehavior, CustomHeaders, DefaultCacheBehavior, FunctionAssociations,
+    FunctionConfig, Origin, OriginCustomHeader,
+};
+use viewer_request::{FunctionAnswer, OriginUpdate};
 use crate::state::{
     managed_cache_policy, matches_path_pattern, same_domain, CachedEdgeResponse,
     ComAmazonawsCloudfrontCloudfront20200531State, StoredDistribution, DEFAULT_ALLOWED_METHODS,
@@ -534,6 +543,20 @@ struct Behavior {
     /// The legacy per-behaviour TTL, for a behaviour that names no cache policy.
     default_ttl: Option<i64>,
     max_ttl: Option<i64>,
+    /// fork: the ARN of the function this behaviour associates for the `viewer-request`
+    /// event, or `None` when it associates none.
+    viewer_request_function: Option<String>,
+}
+
+/// fork: the function `associations` name for the `viewer-request` event. "You can associate
+/// only one function per event type", so the first is the one.
+fn viewer_request_function(associations: Option<&FunctionAssociations>) -> Option<String> {
+    associations
+        .and_then(|associations| associations.items.as_ref())
+        .into_iter()
+        .flatten()
+        .find(|association| association.event_type == viewer_request::VIEWER_REQUEST)
+        .map(|association| association.function_arn.clone())
 }
 
 impl Behavior {
@@ -548,6 +571,7 @@ impl Behavior {
             compress: behavior.compress.unwrap_or(DEFAULT_COMPRESS),
             default_ttl: behavior.default_ttl,
             max_ttl: behavior.max_ttl,
+            viewer_request_function: viewer_request_function(behavior.function_associations.as_ref()),
         }
     }
 
@@ -562,6 +586,7 @@ impl Behavior {
             compress: behavior.compress.unwrap_or(DEFAULT_COMPRESS),
             default_ttl: behavior.default_ttl,
             max_ttl: behavior.max_ttl,
+            viewer_request_function: viewer_request_function(behavior.function_associations.as_ref()),
         }
     }
 
@@ -727,6 +752,30 @@ enum Plan {
     },
     /// The origin must answer it.
     Fetch(Box<OriginFetch>),
+    /// fork: the behaviour's viewer-request function must run first.
+    Function(Box<FunctionStep>),
+    /// fork: CloudFront answers with this response, which a viewer-request function decided.
+    Answered(RtResponse),
+}
+
+/// fork: one viewer-request function run the edge is to make, and what it needs to go on to
+/// the cache and the origin afterwards.
+#[derive(Debug)]
+struct FunctionStep {
+    distribution_id: String,
+    function_arn: String,
+    /// The behaviour selected for the viewer's own path, which still applies whatever the
+    /// function does to the uri.
+    behavior: Behavior,
+    /// The code the function's `LIVE` stage holds.
+    code: Vec<u8>,
+    /// The configuration of that stage, which names its runtime and its key value store.
+    config: FunctionConfig,
+    /// The `cloudfront` module the run reaches, filled in by [`serve`] while the store is
+    /// still held.
+    module: Option<crate::state::CloudFrontModule>,
+    /// The event object, as JSON text.
+    event: String,
 }
 
 /// One answer an ORIGIN produced, as the edge holds it and serves it: the status, the bytes,
@@ -802,7 +851,11 @@ pub async fn serve<Eng: Send + Sync + 'static>(
         // which owes a just-created configuration its deployment.
         store.settle(now);
         cf_id = store.mint_edge_request_id();
-        (served_for, plan) = plan_request(&store, req, &cf_id, now);
+        let (served, mut planned) = plan_request(&store, req, &cf_id, now);
+        if let Plan::Function(step) = &mut planned {
+            step.module = crate::state::cloudfront_module_for(engine, &store, &step.config);
+        }
+        (served_for, plan) = (served, planned);
     }
     let method = req.method().to_ascii_uppercase();
     let request_bytes = req.body().bytes().map_or(0, <[u8]>::len);
@@ -829,30 +882,20 @@ pub async fn serve<Eng: Send + Sync + 'static>(
             edge_metrics::ServedFrom::CloudFront,
             None,
         ),
-        None => match plan {
-            Plan::Generated { status, detail } => (
-                generated(status, detail, &cf_id),
-                edge_metrics::ServedFrom::CloudFront,
-                None,
-            ),
-            Plan::Hit { answer, encode } => (
-                served_origin_answer(&answer, encode, CACHE_HIT, &cf_id),
-                edge_metrics::ServedFrom::EdgeCache,
-                None,
-            ),
-            Plan::Fetch(fetch) => {
-                let fetched = fetch_origin(engine, ctx, *fetch, &cf_id, req, received).await;
-                // An origin that answered is what the answer came FROM; one that answered
-                // nothing leaves CloudFront to produce the answer itself, which is no
-                // origin's and has no origin latency.
-                let served_from = if fetched.origin_latency.is_some() {
-                    edge_metrics::ServedFrom::Origin
-                } else {
-                    edge_metrics::ServedFrom::CloudFront
-                };
-                (fetched.response, served_from, fetched.origin_latency)
-            }
-        },
+        None => {
+            // fork: the viewer-request function runs once the web ACL has let the request
+            // through, and either answers it or hands on the request the rest is decided for.
+            let (plan, forwarded) = match plan {
+                Plan::Function(step) => {
+                    match after_viewer_request(engine, *step, req, &cf_id, now).await {
+                        AfterFunction::Answered(response) => (Plan::Answered(response), None),
+                        AfterFunction::Continue(plan, rebuilt) => (plan, Some(rebuilt)),
+                    }
+                }
+                other => (other, None),
+            };
+            execute(engine, ctx, plan, &cf_id, forwarded.as_ref().unwrap_or(req), received).await
+        }
     };
     // What the edge DID with this request is reported as the distribution's own CloudWatch
     // series, whoever produced the answer: the counters and error rates a client watches a
@@ -876,6 +919,179 @@ pub async fn serve<Eng: Send + Sync + 'static>(
         );
     }
     response
+}
+
+/// Carry out what the plan says, for `req` (the viewer's request, or the one its
+/// viewer-request function returned).
+async fn execute<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &OperationContext<'_>,
+    plan: Plan,
+    cf_id: &str,
+    req: &RtRequest,
+    received: Instant,
+) -> (RtResponse, edge_metrics::ServedFrom, Option<Duration>) {
+    match plan {
+        Plan::Generated { status, detail } => (
+            generated(status, detail, cf_id),
+            edge_metrics::ServedFrom::CloudFront,
+            None,
+        ),
+        Plan::Answered(response) => (response, edge_metrics::ServedFrom::CloudFront, None),
+        Plan::Hit { answer, encode } => (
+            served_origin_answer(&answer, encode, CACHE_HIT, cf_id),
+            edge_metrics::ServedFrom::EdgeCache,
+            None,
+        ),
+        Plan::Fetch(fetch) => {
+            let fetched = fetch_origin(engine, ctx, *fetch, cf_id, req, received).await;
+            // An origin that answered is what the answer came FROM; one that answered
+            // nothing leaves CloudFront to produce the answer itself, which is no
+            // origin's and has no origin latency.
+            let served_from = if fetched.origin_latency.is_some() {
+                edge_metrics::ServedFrom::Origin
+            } else {
+                edge_metrics::ServedFrom::CloudFront
+            };
+            (fetched.response, served_from, fetched.origin_latency)
+        }
+        // A function step is run before a plan is executed, so none reaches here; it is
+        // answered as the function execution error it would otherwise be.
+        Plan::Function(_) => (
+            generated(viewer_request::FUNCTION_ERROR_STATUS, viewer_request::FUNCTION_ERROR_DETAIL, cf_id),
+            edge_metrics::ServedFrom::CloudFront,
+            None,
+        ),
+    }
+}
+
+/// fork: what running a viewer-request function came to.
+enum AfterFunction {
+    /// CloudFront answers the viewer with this: the response the function generated, or the
+    /// function execution error.
+    Answered(RtResponse),
+    /// The request the function returned goes on under this plan.
+    Continue(Plan, RtRequest),
+}
+
+/// fork: run the behaviour's viewer-request function over `req`, and decide what follows.
+///
+/// A run that fails, is stopped, or answers with something CloudFront cannot use is the
+/// function execution error ([`viewer_request::FUNCTION_ERROR_STATUS`]), logged with why.
+/// The store is not held while the function runs; it is read again afterwards, by the
+/// distribution's id, to plan the cache read and the origin fetch for the returned request.
+async fn after_viewer_request<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    step: FunctionStep,
+    req: &RtRequest,
+    cf_id: &str,
+    now: SystemTime,
+) -> AfterFunction {
+    let distribution = step.distribution_id.as_str();
+    let function = step.function_arn.as_str();
+    let function_error = |reason: &str| {
+        ::tracing::warn!(
+            distribution,
+            function,
+            reason,
+            "the viewer-request function did not produce a usable answer, so CloudFront \
+             answers the function execution error"
+        );
+        AfterFunction::Answered(generated(
+            viewer_request::FUNCTION_ERROR_STATUS,
+            viewer_request::FUNCTION_ERROR_DETAIL,
+            cf_id,
+        ))
+    };
+    let run = crate::state::run_function(step.code, step.event, step.module).await;
+    ::tracing::debug!(distribution, function, logs = ?run.logs, "the viewer-request function ran");
+    let output = match run.outcome {
+        crate::state::FunctionOutcome::Returned(output) => output,
+        crate::state::FunctionOutcome::Failed(message)
+        | crate::state::FunctionOutcome::Unavailable(message) => return function_error(&message),
+    };
+    let modified = match viewer_request::answer(&output) {
+        Ok(FunctionAnswer::Response(response)) => {
+            return AfterFunction::Answered(function_response(response, cf_id))
+        }
+        Ok(FunctionAnswer::Request(modified)) => modified,
+        Err(reason) => return function_error(&reason),
+    };
+    let update = match run.origin_update.as_deref().map(viewer_request::origin_update).transpose() {
+        Ok(update) => update,
+        Err(reason) => return function_error(&reason),
+    };
+    let rebuilt = match rebuilt_request(req, &modified) {
+        Ok(rebuilt) => rebuilt,
+        Err(reason) => return function_error(&reason),
+    };
+    let Some(state) = crate::state::service_state(engine) else {
+        return AfterFunction::Answered(generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id));
+    };
+    let plan = {
+        let store = state.lock();
+        match store.distributions.get(distribution) {
+            Some(held) => plan_origin(
+                &store,
+                held,
+                &step.behavior,
+                &Forwarded {
+                    viewer_path: &modified.uri,
+                    query: &modified.query,
+                    req: &rebuilt,
+                    update: update.as_ref(),
+                },
+                cf_id,
+                now,
+            ),
+            // The distribution was deleted while the function ran.
+            None => Plan::Generated {
+                status: FORBIDDEN,
+                detail: BAD_REQUEST_DETAIL,
+            },
+        }
+    };
+    AfterFunction::Continue(plan, rebuilt)
+}
+
+/// fork: the request a viewer-request function returned, as the rest of the edge reads it:
+/// the viewer's method and body, and the function's uri, query string and headers.
+fn rebuilt_request(
+    req: &RtRequest,
+    modified: &viewer_request::ModifiedRequest,
+) -> Result<RtRequest, String> {
+    let uri = if modified.query.is_empty() {
+        modified.uri.clone()
+    } else {
+        format!("{}?{}", modified.uri, modified.query)
+    };
+    let mut builder = ::http::Request::builder().method(req.method()).uri(&uri);
+    for (name, value) in &modified.headers {
+        builder = builder.header(name, value);
+    }
+    let body = req.body().bytes().map(<[u8]>::to_vec).unwrap_or_default();
+    let built = builder
+        .body(SdkBody::from(body))
+        .map_err(|error| format!("the returned request is not an HTTP request: {error}"))?;
+    RtRequest::try_from(built)
+        .map_err(|error| format!("the returned request is not an HTTP request: {error}"))
+}
+
+/// fork: the response a viewer-request function generated, served as CloudFront serves one.
+fn function_response(response: viewer_request::GeneratedResponse, cf_id: &str) -> RtResponse {
+    let mut served = served(
+        response.status,
+        response.body,
+        viewer_request::FUNCTION_GENERATED_RESPONSE,
+        cf_id,
+    );
+    for (name, value) in response.headers {
+        if name == X_CACHE || name == X_AMZ_CF_ID {
+            continue;
+        }
+        let _ = served.headers_mut().try_append(name, value);
+    }
+    served
 }
 
 /// The answer the edge serves for a viewer request the distribution's web ACL did not let
@@ -1008,12 +1224,110 @@ fn plan_resolved(
             detail: BAD_REQUEST_DETAIL,
         };
     }
-    let ttl = cache_ttl(store, &behavior);
+    // fork: the behaviour's viewer-request function runs before the edge cache is read, over
+    // the request as the viewer sent it.
+    if let Some(function_arn) = behavior.viewer_request_function.clone() {
+        return function_step(store, resolved, addressed, behavior, function_arn, req, cf_id);
+    }
+    plan_origin(
+        store,
+        resolved.distribution,
+        &behavior,
+        &Forwarded {
+            viewer_path: &viewer_path,
+            query: addressed.query,
+            req,
+            update: None,
+        },
+        cf_id,
+        now,
+    )
+}
+
+/// fork: the run of `function_arn` the edge is to make for this request, or the function
+/// execution error when the function has no `LIVE` stage to run.
+fn function_step(
+    store: &ComAmazonawsCloudfrontCloudfront20200531State,
+    resolved: &Resolved<'_, '_>,
+    addressed: &Addressed<'_>,
+    behavior: Behavior,
+    function_arn: String,
+    req: &RtRequest,
+    cf_id: &str,
+) -> Plan {
+    let live = store
+        .function_by_arn(&function_arn)
+        .and_then(|function| function.stage(crate::state::FUNCTION_STAGE_LIVE));
+    let Some(live) = live else {
+        // An association to a function with no LIVE stage cannot be created, so this is a
+        // function that lost its published stage: there is no code to run.
+        ::tracing::warn!(
+            distribution = %resolved.distribution.id,
+            function = %function_arn,
+            "the viewer-request function has no LIVE stage to run"
+        );
+        return Plan::Generated {
+            status: viewer_request::FUNCTION_ERROR_STATUS,
+            detail: viewer_request::FUNCTION_ERROR_DETAIL,
+        };
+    };
+    let viewer_ip = ::emulator_server::connection_peer()
+        .map_or_else(|| DEFAULT_VIEWER_IP.to_string(), |peer| peer.ip().to_string());
+    let event = viewer_request::event(&viewer_request::ViewerRequest {
+        distribution_domain_name: &resolved.distribution.domain_name,
+        distribution_id: &resolved.distribution.id,
+        request_id: cf_id,
+        viewer_ip: &viewer_ip,
+        method: &req.method().to_ascii_uppercase(),
+        uri: resolved.viewer_path,
+        query: addressed.query,
+        headers: req.headers(),
+    });
+    Plan::Function(Box::new(FunctionStep {
+        distribution_id: resolved.distribution.id.clone(),
+        function_arn,
+        behavior,
+        code: live.code.clone(),
+        config: live.config.clone(),
+        module: None,
+        event,
+    }))
+}
+
+/// fork: the viewer address a function's event object reports when the request reached the
+/// edge through no connection of its own (an in-process call): every viewer of this
+/// emulator dials a loopback address.
+const DEFAULT_VIEWER_IP: &str = "127.0.0.1";
+
+/// The request the cache and the origin are decided for: the viewer's, or the one its
+/// viewer-request function returned, with the origin properties the function set.
+struct Forwarded<'r> {
+    viewer_path: &'r str,
+    query: &'r str,
+    req: &'r RtRequest,
+    update: Option<&'r OriginUpdate>,
+}
+
+/// Decide the cache read and the origin fetch for a request whose behaviour is selected and
+/// whose method it allows.
+fn plan_origin(
+    store: &ComAmazonawsCloudfrontCloudfront20200531State,
+    distribution: &StoredDistribution,
+    behavior: &Behavior,
+    planned: &Forwarded<'_>,
+    cf_id: &str,
+    now: SystemTime,
+) -> Plan {
+    let distribution_id = distribution.id.clone();
+    let viewer_path = planned.viewer_path.to_string();
+    let req = planned.req;
+    let method = req.method().to_ascii_uppercase();
+    let ttl = cache_ttl(store, behavior);
     // What the behaviour's POLICIES make of this request: which of its parts take part in
     // the cache key, which of them reach the origin, and what the cache policy makes of the
     // viewer's `Accept-Encoding` ([`forwarding`]).
-    let keyed = forwarding::cache_key_parameters(store, &behavior);
-    let forwarded = forwarding::forwarded_parameters(store, &behavior);
+    let keyed = forwarding::cache_key_parameters(store, behavior);
+    let forwarded = forwarding::forwarded_parameters(store, behavior);
     let accept_encoding =
         forwarding::accept_encoding(&keyed, req.headers().get(ACCEPT_ENCODING));
     // "Whether you want CloudFront to automatically compress certain files for this cache
@@ -1027,14 +1341,14 @@ fn plan_resolved(
     let cache_key = cache_key(
         &method,
         &viewer_path,
-        &keyed_values(&keyed, &accept_encoding, addressed.query, req),
+        &keyed_values(&keyed, &accept_encoding, planned.query, req),
     );
     // "The HTTP methods for which CloudFront caches responses": a cacheable method under
     // a caching cache policy may be answered from the cache; everything else goes to the
     // origin every time.
     let cacheable = behavior.caches(&method).then_some(ttl).flatten();
     if cacheable.is_some() {
-        if let Some(entry) = resolved.distribution.cached_edge_response(&cache_key, now) {
+        if let Some(entry) = distribution.cached_edge_response(&cache_key, now) {
             return Plan::Hit {
                 answer: OriginAnswer {
                     status: entry.status,
@@ -1046,8 +1360,7 @@ fn plan_resolved(
             };
         }
     }
-    let Some(origin) = resolved
-        .distribution
+    let Some(configured) = distribution
         .config
         .origins
         .items
@@ -1061,12 +1374,21 @@ fn plan_resolved(
             detail: NO_ORIGIN_DETAIL,
         };
     };
-    let headers = origin_request_headers(store, &behavior, origin, req, cf_id);
+    // fork: the origin the viewer-request function set, over the configured one.
+    let updated = planned.update.map(|update| updated_origin(configured, update));
+    let origin = updated.as_ref().unwrap_or(configured);
+    let mut headers = origin_request_headers(store, behavior, origin, req, cf_id);
+    if let Some(host) = planned.update.and_then(|update| update.host_header.as_deref()) {
+        if !same_domain(host, bare_host(&origin.domain_name)) {
+            headers.retain(|(name, _)| name != viewer_request::FORWARDED_HOST);
+            headers.push((viewer_request::FORWARDED_HOST.to_string(), host.to_string()));
+        }
+    }
     // A REQUEST LOOP: the origin is a host the edge itself serves, or this request has
     // already been through an edge (its `Via` names CloudFront). Either way, fetching it
     // would hand the request back to the edge it came from, so the fetch is not made and
     // the request is answered the way an origin CloudFront cannot get a response from is.
-    if serves_host(resolved.distribution, bare_host(&origin.domain_name))
+    if serves_host(distribution, bare_host(&origin.domain_name))
         || carries_cloudfront_via(req)
     {
         ::tracing::warn!(
@@ -1084,15 +1406,24 @@ fn plan_resolved(
     // configuration: what it says about this fetch is decided after the lock is released
     // (see [`origin_access`]), because the origin's own resource policy is read from the
     // origin's own service.
-    let uri = origin_uri(origin, &viewer_path, &origin_query(&keyed, &forwarded, addressed.query));
-    let access = origin_access::of_fetch(
-        store,
-        resolved.distribution,
-        origin,
-        &method,
-        path_of(&uri),
-        req.headers().get("authorization").is_some(),
-    );
+    let uri = origin_uri(origin, &viewer_path, &origin_query(&keyed, &forwarded, planned.query));
+    // fork: an origin the function moved to another domain is not the one the origin access
+    // control was configured for, so the fetch is made unsigned.
+    let moved = planned
+        .update
+        .is_some_and(|update| update.domain_name.is_some());
+    let access = if moved {
+        None
+    } else {
+        origin_access::of_fetch(
+            store,
+            distribution,
+            origin,
+            &method,
+            path_of(&uri),
+            req.headers().get("authorization").is_some(),
+        )
+    };
     let fetch = OriginFetch {
         distribution_id,
         uri,
@@ -1231,7 +1562,14 @@ fn origin_uri(origin: &Origin, viewer_path: &str, query: &str) -> String {
         Some(custom) => ("https", custom.https_port),
         None => ("https", 443),
     };
+    // fork: a domain that already names its port (the `host:port` a load balancer this
+    // emulator serves on a socket of its own publishes) is addressed at that port.
+    let names_port = origin
+        .domain_name
+        .parse::<::http::uri::Authority>()
+        .is_ok_and(|authority| authority.port().is_some());
     let authority = match (scheme, port) {
+        _ if names_port => origin.domain_name.clone(),
         ("http", 80) | ("https", 443) => origin.domain_name.clone(),
         _ => format!("{}:{port}", origin.domain_name),
     };
@@ -1250,6 +1588,33 @@ fn origin_uri(origin: &Origin, viewer_path: &str, query: &str) -> String {
     } else {
         format!("{scheme}://{authority}{origin_path}{path}?{query}")
     }
+}
+
+/// fork: `configured` with the origin properties a viewer-request function set: "Any
+/// settings that you don't specify in the `updateRequestOrigin()` will inherit the same
+/// settings from the existing origin's configuration."
+fn updated_origin(configured: &Origin, update: &OriginUpdate) -> Origin {
+    let mut origin = configured.clone();
+    if let Some(domain_name) = &update.domain_name {
+        origin.domain_name = domain_name.clone();
+    }
+    if let Some(origin_path) = &update.origin_path {
+        origin.origin_path = Some(origin_path.clone());
+    }
+    if let Some(custom_headers) = &update.custom_headers {
+        let items: Vec<OriginCustomHeader> = custom_headers
+            .iter()
+            .map(|(name, value)| OriginCustomHeader {
+                header_name: name.clone(),
+                header_value: value.clone(),
+            })
+            .collect();
+        origin.custom_headers = Some(CustomHeaders {
+            quantity: i32::try_from(items.len()).unwrap_or(i32::MAX),
+            items: Some(items),
+        });
+    }
+    origin
 }
 
 /// The longest an origin fetch may wait, whatever the configuration asks for:
@@ -2001,6 +2366,7 @@ mod tests {
                 compress: false,
                 default_ttl: None,
                 max_ttl: None,
+                viewer_request_function: None,
             };
             let mut req = RtRequest::new(SdkBody::empty());
             req.set_uri("/index.html").expect("a valid URI");
@@ -2284,6 +2650,7 @@ mod tests {
             compress: true,
             default_ttl: None,
             max_ttl: None,
+            viewer_request_function: None,
         }
     }
 

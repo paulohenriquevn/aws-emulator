@@ -126,6 +126,11 @@ pub use functions::*;
 pub mod function_runtime;
 pub use function_runtime::*;
 
+/// fork: the `cloudfront` module a stored function runs with: which key value store its
+/// configuration associates, read live from the key value store service's own state.
+pub mod function_module;
+pub use function_module::*;
+
 /// The CONNECTION FUNCTION slice of this store: the connection function record, its two
 /// stages, their quotas, the id, ARN and path one is addressed by, and the modelled errors
 /// the connection function operations answer with. A SUBMODULE for the same reason

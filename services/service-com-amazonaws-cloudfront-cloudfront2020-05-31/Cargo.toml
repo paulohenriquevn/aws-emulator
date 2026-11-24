@@ -67,6 +67,9 @@ service-com-amazonaws-wafv2-awswaf-20190729 = { workspace = true }
 # the engine's own. 0.14 is the version this workspace's other services already run it at, and
 # it carries no advisory.
 rquickjs = "0.14"
+# fork: the data plane of the key value store a CloudFront function is associated with,
+# which `cf.kvs()` reads live while the function runs (`state::function_module`).
+service-com-amazonaws-cloudfrontkeyvaluestore-cloudfrontkeyvaluestore = { workspace = true }
 # The account's S3 OBJECT a trust store's CA certificates bundle is: `CreateTrustStore`
 # reads the bundle in the one object store this emulator holds, over the in-process
 # callback, so the certificate count it reports comes from those bytes

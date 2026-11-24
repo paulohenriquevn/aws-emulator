@@ -21,6 +21,13 @@
 //! is installed, so an `import` resolves to nothing; plain QuickJS registers no filesystem,
 //! process, environment, network, host-library or thread API, and nothing here adds one.
 //!
+//! fork: the one exception is the `cloudfront` module of the `cloudfront-js-2.0` runtime,
+//! which a caller passes in ([`CloudFrontModule`]). Its import is bound by the host rather
+//! than by a loader, and it adds exactly three host functions, each reachable only through
+//! the module object: a value reader and a metadata reader over the ONE key value store
+//! associated with the function, and a recorder of the origin properties
+//! `updateRequestOrigin` was called with. [`cloudfront_module`] states each of them.
+//!
 //! # What bounds it
 //!
 //! Every bound lives in host code the running function cannot reach:
@@ -54,6 +61,13 @@ use std::time::{Duration, Instant};
 use ::rquickjs::function::Func;
 use ::rquickjs::{CatchResultExt, Context, Ctx, Function, Runtime, Value};
 use ::serde_json::Value as Json;
+
+/// fork: the `cloudfront` module a `cloudfront-js-2.0` function imports.
+pub mod cloudfront_module;
+pub use cloudfront_module::{
+    AssociatedKeyValueStore, CloudFrontModule, KeyValueStoreMeta, KeyValueStoreReader,
+    CLOUDFRONT_MODULE_RUNTIME, MAX_ORIGIN_UPDATE_BYTES,
+};
 
 /// The global a CloudFront function's code declares and CloudFront calls: "the function code
 /// ... declares a function named `handler`", which is handed the event object and whose
@@ -182,6 +196,10 @@ pub struct FunctionRun {
     /// How long the engine spent compiling and running the code, which is what the reported
     /// compute utilization is measured from.
     pub elapsed: Duration,
+    /// fork: the JSON text of the last argument the function passed to
+    /// `cf.updateRequestOrigin`, or `None` when it called it never (or could not reach the
+    /// module at all).
+    pub origin_update: Option<String>,
 }
 
 impl FunctionRun {
@@ -204,6 +222,7 @@ impl FunctionRun {
             outcome: FunctionOutcome::Unavailable(reason),
             logs: Vec::new(),
             elapsed: Duration::ZERO,
+            origin_update: None,
         }
     }
 }
@@ -227,7 +246,15 @@ impl FunctionRun {
 /// slot comes back only when the engine thread ends, so [`MAX_CONCURRENT_RUNS`] bounds the
 /// engines that exist whatever a caller does; a caller that finds every slot still taken is
 /// answered as a run that did not happen.
-pub async fn run_function(code: Vec<u8>, event: String) -> FunctionRun {
+///
+/// fork: `module` is the `cloudfront` module the code may import, for a function of the
+/// [`CLOUDFRONT_MODULE_RUNTIME`]; `None` for one of any other runtime, whose code reaches no
+/// module at all.
+pub async fn run_function(
+    code: Vec<u8>,
+    event: String,
+    module: Option<CloudFrontModule>,
+) -> FunctionRun {
     let waited = ::tokio::time::timeout(
         RUN_PERMIT_WAIT,
         ::std::sync::Arc::clone(function_runs()).acquire_owned(),
@@ -246,7 +273,7 @@ pub async fn run_function(code: Vec<u8>, event: String) -> FunctionRun {
     let running = ::tokio::task::spawn_blocking(move || {
         // The slot is released where the RUN ends, on every path out of it.
         let _slot = permit;
-        run(code, &event)
+        run(code, &event, module.as_ref())
     });
     match ::tokio::time::timeout(CALLER_WAIT_CEILING, running).await {
         Ok(Ok(run)) => run,
@@ -261,7 +288,7 @@ pub async fn run_function(code: Vec<u8>, event: String) -> FunctionRun {
 }
 
 /// Run `code` over `event` on THIS thread, under every bound this module declares.
-fn run(code: Vec<u8>, event: &str) -> FunctionRun {
+fn run(code: Vec<u8>, event: &str, module: Option<&CloudFrontModule>) -> FunctionRun {
     let collected = Arc::new(Mutex::new(Collected::default()));
     // The code is a blob on the wire, so it may be bytes no engine can read at all. That is
     // a property of the code rather than of this emulator, so it is the function failing.
@@ -294,7 +321,7 @@ fn run(code: Vec<u8>, event: &str) -> FunctionRun {
 
     let answer: Arc<Mutex<Option<Answered>>> = Arc::new(Mutex::new(None));
     let (invoked, mut elapsed) =
-        context.with(|ctx| invoke(&ctx, &source, event, &collected, &answer));
+        context.with(|ctx| invoke(&ctx, &source, event, module, &collected, &answer));
     // A handler that returned a promise has not answered yet: its jobs are what settle it,
     // and nothing else of this run drives them.
     if matches!(invoked, Invoked::Pending) {
@@ -341,6 +368,7 @@ fn finished(
         outcome,
         logs: collected.logs.clone(),
         elapsed,
+        origin_update: collected.origin_update.clone(),
     }
 }
 
@@ -372,12 +400,27 @@ fn invoke(
     ctx: &Ctx<'_>,
     source: &str,
     event: &str,
+    module: Option<&CloudFrontModule>,
     collected: &Arc<Mutex<Collected>>,
     answer: &Arc<Mutex<Option<Answered>>>,
 ) -> (Invoked, Duration) {
     if let Err(reason) = install_console(ctx, collected) {
         return (Invoked::Unavailable(reason), Duration::ZERO);
     }
+    // fork: the `cloudfront` module, bound BEFORE any of the caller's code is compiled, under
+    // the names the code's own import lines give it.
+    let bound;
+    let source = match module {
+        Some(module) => {
+            let (rewritten, bindings) = cloudfront_module::bind_imports(source);
+            if let Err(reason) = cloudfront_module::install(ctx, module, &bindings, collected) {
+                return (Invoked::Unavailable(reason), Duration::ZERO);
+            }
+            bound = rewritten;
+            bound.as_str()
+        }
+        None => source,
+    };
     // Held BEFORE any of the caller's code is compiled, so the invoker this run reads its
     // answer through is this module's own however the code rebinds the global object.
     let invoker = match ctx.eval::<Function<'_>, _>(INVOKER_SOURCE).catch(ctx) {
@@ -524,6 +567,8 @@ const RETURNED_NO_EVENT_OBJECT: &str =
 #[derive(Debug, Default)]
 struct Collected {
     logs: Vec<String>,
+    /// fork: what the `cloudfront` module's origin recorder last kept.
+    origin_update: Option<String>,
 }
 
 impl Collected {
@@ -753,7 +798,190 @@ impl Bounds {
 
 #[cfg(test)]
 mod tests {
-    use super::Bounds;
+    use super::{
+        run, AssociatedKeyValueStore, Bounds, CloudFrontModule, FunctionOutcome,
+        KeyValueStoreMeta, KeyValueStoreReader,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    /// A key value store held in memory, read the way the module reads the real one.
+    struct Held(Vec<(&'static str, &'static str)>);
+
+    impl KeyValueStoreReader for Held {
+        fn value(&self, key: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(held, _)| *held == key)
+                .map(|(_, value)| (*value).to_string())
+        }
+
+        fn meta(&self) -> KeyValueStoreMeta {
+            KeyValueStoreMeta {
+                creation: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+                last_updated: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060),
+                key_count: self.0.len() as u64,
+            }
+        }
+    }
+
+    const STORE_ID: &str = "a1b2c3d4-5678-90ab-cdef-EXAMPLE11111";
+
+    fn module_over(pairs: Vec<(&'static str, &'static str)>) -> CloudFrontModule {
+        CloudFrontModule {
+            key_value_store: Some(AssociatedKeyValueStore {
+                id: STORE_ID.to_string(),
+                reader: Arc::new(Held(pairs)),
+            }),
+        }
+    }
+
+    const EVENT: &str = r#"{"version":"1.0","request":{"method":"GET","uri":"/","headers":{"host":{"value":"x.apps.example.com"}},"querystring":{},"cookies":{}}}"#;
+
+    fn returned(outcome: &FunctionOutcome) -> ::serde_json::Value {
+        match outcome {
+            FunctionOutcome::Returned(text) => ::serde_json::from_str(text).expect("JSON output"),
+            other => panic!("expected the function to return, got {other:?}"),
+        }
+    }
+
+    /// The `cloudfront` module's key value store handle reads the associated store: a held
+    /// key's value in each format, `exists` on a held and a missing key, and `meta()`.
+    #[test]
+    fn a_cloudfront_js_2_function_reads_its_key_value_store_through_the_module() {
+        let code = r#"
+            import cf from 'cloudfront';
+            const kvs = cf.kvs();
+            async function handler(event) {
+                const request = event.request;
+                const route = await kvs.get('route:x', { format: 'json' });
+                const text = await cf.kvs('a1b2c3d4-5678-90ab-cdef-EXAMPLE11111').get('origin:cell-0');
+                const bytes = await kvs.get('origin:cell-0', { format: 'bytes' });
+                const meta = await kvs.meta();
+                request.headers['x-cell'] = { value: route.cellId };
+                request.headers['x-origin'] = { value: text };
+                request.headers['x-bytes'] = { value: String(bytes.length) };
+                request.headers['x-held'] = { value: String(await kvs.exists('route:x')) };
+                request.headers['x-missing'] = { value: String(await kvs.exists('route:y')) };
+                request.headers['x-keys'] = { value: String(meta.keyCount) };
+                request.headers['x-created'] = { value: meta.creationDateTime };
+                return request;
+            }
+        "#;
+        let module = module_over(vec![
+            ("route:x", r#"{"cellId":"cell-0"}"#),
+            ("origin:cell-0", "cell-0.elb.example.com"),
+        ]);
+        let run = run(code.as_bytes().to_vec(), EVENT, Some(&module));
+        let output = returned(&run.outcome);
+        let headers = &output["request"]["headers"];
+        let header = |name: &str| headers[name]["value"].as_str().unwrap_or_default().to_string();
+        assert_eq!(header("x-cell"), "cell-0", "get with the json format");
+        assert_eq!(header("x-origin"), "cell-0.elb.example.com", "get through kvs(id)");
+        assert_eq!(header("x-bytes"), "22", "get with the bytes format");
+        assert_eq!(header("x-held"), "true", "exists on a held key");
+        assert_eq!(header("x-missing"), "false", "exists on a missing key");
+        assert_eq!(header("x-keys"), "2", "meta().keyCount");
+        assert_eq!(header("x-created"), "2023-11-14T22:13:20Z", "meta().creationDateTime");
+    }
+
+    /// "The `get()` method will return an error when the key that you requested doesn't
+    /// exist": a function that awaits it without a catch fails, and one that catches it goes
+    /// on.
+    #[test]
+    fn a_get_of_a_missing_key_rejects() {
+        let uncaught = r#"
+            import cf from 'cloudfront';
+            async function handler(event) {
+                await cf.kvs().get('route:nobody');
+                return event.request;
+            }
+        "#;
+        let run_uncaught = run(uncaught.as_bytes().to_vec(), EVENT, Some(&module_over(vec![])));
+        match &run_uncaught.outcome {
+            FunctionOutcome::Failed(message) => assert!(
+                message.contains("Key not found"),
+                "expected the rejection to name the missing key, got {message:?}"
+            ),
+            other => panic!("expected the function to fail, got {other:?}"),
+        }
+
+        let caught = r#"
+            import cf from 'cloudfront';
+            async function handler(event) {
+                try {
+                    await cf.kvs().get('route:nobody');
+                } catch (e) {
+                    return { statusCode: 404, statusDescription: 'Not Found' };
+                }
+                return event.request;
+            }
+        "#;
+        let run_caught = run(caught.as_bytes().to_vec(), EVENT, Some(&module_over(vec![])));
+        assert_eq!(returned(&run_caught.outcome)["response"]["statusCode"], 404);
+    }
+
+    /// `updateRequestOrigin` records the properties it was called with on the run, the last
+    /// call winning, and the function's own answer is unchanged by it.
+    #[test]
+    fn update_request_origin_is_recorded_on_the_run() {
+        let code = r#"
+            import cf from 'cloudfront';
+            function handler(event) {
+                cf.updateRequestOrigin({ domainName: 'first.example.com' });
+                cf.updateRequestOrigin({ domainName: 'cell-0.example.com', hostHeader: 'x.example.com' });
+                return event.request;
+            }
+        "#;
+        let run = run(code.as_bytes().to_vec(), EVENT, Some(&CloudFrontModule::default()));
+        returned(&run.outcome);
+        let recorded: ::serde_json::Value = ::serde_json::from_str(
+            run.origin_update.as_deref().expect("the origin update is recorded"),
+        )
+        .expect("JSON");
+        assert_eq!(
+            recorded,
+            ::serde_json::json!({ "domainName": "cell-0.example.com", "hostHeader": "x.example.com" })
+        );
+    }
+
+    /// The module refuses what it cannot serve: a handle for a function with no associated
+    /// store, a handle for a store other than the associated one, and a non-object origin.
+    #[test]
+    fn the_module_refuses_what_the_function_is_not_associated_with() {
+        let cases: [(&str, &str, CloudFrontModule, &str); 3] = [
+            ("no associated store", "cf.kvs()", CloudFrontModule::default(), "No key value store"),
+            ("another store", "cf.kvs('other-id')", module_over(vec![]), "is not the one associated"),
+            ("a string origin", "cf.updateRequestOrigin('x')", CloudFrontModule::default(), "takes an object"),
+        ];
+        for (case, call, module, expected) in cases {
+            let code = format!(
+                "import cf from 'cloudfront';\nfunction handler(event) {{ {call}; return event.request; }}\n"
+            );
+            let run = run(code.into_bytes(), EVENT, Some(&module));
+            match &run.outcome {
+                FunctionOutcome::Failed(message) => assert!(
+                    message.contains(expected),
+                    "case {case:?}: expected {expected:?} in {message:?}"
+                ),
+                other => panic!("case {case:?}: expected the function to fail, got {other:?}"),
+            }
+        }
+    }
+
+    /// Without the module (a `cloudfront-js-1.0` function), an import is not bound: the code
+    /// does not compile, as with no module loader at all.
+    #[test]
+    fn an_import_does_not_compile_without_the_module() {
+        let code = "import cf from 'cloudfront';\nfunction handler(event) { return event.request; }\n";
+        let run = run(code.as_bytes().to_vec(), EVENT, None);
+        assert!(
+            matches!(run.outcome, FunctionOutcome::Failed(_)),
+            "expected a compile failure, got {:?}",
+            run.outcome
+        );
+        assert_eq!(run.origin_update, None);
+    }
 
     /// The step budget is what stops code the clock has not caught, so it has to STAY spent:
     /// the engine keeps asking after a bound has been breached (every later check, and every

@@ -235,6 +235,12 @@ jobs:
           rm vendor/server/Cargo.lock
           cargo test -p aws-emulator-fork-router --test cloudfront_key_value_store
 
+      - name: A distribution runs its viewer-request CloudFront Function
+        run: |
+          cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --lib -- function_runtime edge::viewer_request
+          cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --test all -- edge_viewer_request_function function_test_run
+          cargo test -p aws-emulator-fork-router --test cloudfront_viewer_request_function
+
       - name: Unit tests of the workload identity patches
         run: >-
           cargo test --lib

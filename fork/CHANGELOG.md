@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Added
 - The CloudFront KeyValueStore data plane (`cloudfront-keyvaluestore`) is mounted: `DescribeKeyValueStore`, `GetKey`, `PutKey` with its `If-Match` check, `DeleteKey`, `UpdateKeys` and `ListKeys` serve the stores CloudFront `CreateKeyValueStore` creates, so an SDK or the AWS CLI can read and write keys a CloudFront Function reads
 - With `--auth on`, a request signed with SigV4A (`AWS4-ECDSA-P256-SHA256`), as SDKs sign the KeyValueStore data plane, is accepted when its signature verifies against the emulator's keys or a credential it created, and refused as a bad SigV4 signature is otherwise. Presigned SigV4A URLs are still refused
+- A distribution's edge runs the `viewer-request` CloudFront Function its cache behavior associates, from the function's `LIVE` stage, over the event object CloudFront builds for the request. A response the function returns is served without asking the origin, a request it returns goes on with its uri, query string, headers and cookies, and a function that throws or runs out of its budget is answered 503
+- A `cloudfront-js-2.0` function can `import cf from 'cloudfront'`: `cf.kvs()` reads the associated key value store (`get` in the string, json and bytes formats, `exists` and `meta`), and `cf.updateRequestOrigin` sends the origin request to another `domainName` with another `hostHeader`, `originPath` or `customHeaders`; another origin property makes the request fail with 503 and is logged. `TestFunction` runs the same module
 
 ## [0.4.2] - 2026-11-24
 
