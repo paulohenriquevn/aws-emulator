@@ -363,7 +363,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                                 message: Some(format!(
                                     "this registry holds at most {} bytes per in-flight layer \
                                      upload",
-                                    crate::state::MAX_LAYER_UPLOAD_BYTES
+                                    crate::state::max_layer_upload_bytes()
                                 )),
                             },
                         ),

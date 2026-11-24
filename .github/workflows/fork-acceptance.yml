@@ -7,9 +7,10 @@ name: fork acceptance
 on:
   pull_request:
     branches: [develop, main]
-  # A version tag runs everything, then publishes the binary the run tested (job release).
+  # A version tag runs everything, then publishes the binary the run tested (job release). A
+  # pre-release (-rc.N) is built by fork-preview.yml without this run.
   push:
-    tags: ["v*"]
+    tags: ["v*", "!v*-rc.*"]
   workflow_dispatch:
     inputs:
       emulator-run-id:
@@ -41,7 +42,8 @@ env:
 
 jobs:
   tested-tree:
-    # Finds a run that already passed every job on this git tree (fork/ci/find-tested-run.sh).
+    # Finds a run that already passed every job on this git tree (fork/ci/find-tested-run.sh),
+    # leaving fork/CHANGELOG.md out of the tree (fork/ci/tested-tree.sh).
     # A promotion into main and its version tag carry the tree the pull request into develop
     # tested, so they skip the jobs below and the release publishes that run's binaries.
     runs-on: ubuntu-latest
@@ -53,7 +55,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Tests of the tested-run lookup
-        run: fork/ci/find-tested-run_test.sh
+        run: |
+          fork/ci/find-tested-run_test.sh
+          fork/ci/tested-tree_test.sh
 
       - name: Look up a run that tested this tree
         id: lookup
@@ -61,7 +65,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
         run: |
-          tree=$(git rev-parse 'HEAD^{tree}')
+          tree=$(fork/ci/tested-tree.sh)
           echo "tree=$tree" >>"$GITHUB_OUTPUT"
           # A manual run asks for its jobs to run, so it never reuses one.
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then exit 0; fi
