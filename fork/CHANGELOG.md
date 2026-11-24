@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-24
+
 ### Fixed
 - An ECR layer upload may grow to ECR's published maximum layer size, 52,000 MiB, clipped to the registry ceiling `EMULATOR_ECR_MAX_STORED_BYTES` sets; it was capped at 128 MiB, which refused a 211 MB Node.js base layer with 413 on `docker push` (#25)
 
@@ -104,7 +106,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - An RDS instance or cluster created with a `Port` listens on it, on another loopback address when 127.0.0.1 already serves that port, so `Endpoint.Port` matches the configuration and Terraform plans no change (#1)
 - The emulator's TLS certificate covers `000000000000.localhost`, so clients that prefix the host with the account id still verify it (#1)
 
-[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/paulohenriquevn/aws-emulator/compare/v0.3.0...v0.3.1
