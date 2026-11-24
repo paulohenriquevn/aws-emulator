@@ -10,8 +10,10 @@ use aws_emulator_fork_router::{build_router, InMemoryEngine};
 use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningParams, SigningSettings};
 use bytes::Bytes;
 use emulator_server::{EmulatorService, SigV4Authenticator};
+use service_com_amazonaws_ec2_amazonec2::state as ec2;
+use service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State as ElbState;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// The emulator endpoint the requests are addressed to.
 pub const HOST: &str = "127.0.0.1:9297";
@@ -166,4 +168,149 @@ pub async fn create_key_value_store(router: &Router, name: &str) -> String {
     let created = send(router, request).await;
     assert_eq!(created.status, 201, "CreateKeyValueStore: {}", created.text);
     element(&created.text, "ARN")
+}
+
+pub const ELB: Scheme = Scheme::SigV4 { signing_name: "elasticloadbalancing", region: "us-east-1" };
+
+/// One awsQuery call to Elastic Load Balancing v2.
+pub async fn elb(router: &Router, fields: &[(&str, &str)]) -> Reply {
+    let mut all = vec![("Version", "2015-12-01")];
+    all.extend_from_slice(fields);
+    let body = all
+        .iter()
+        .map(|(name, value)| format!("{}={}", segment(name), segment(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let headers = [("content-type", "application/x-www-form-urlencoded")];
+    let reply = send(router, signed_by_emulator(&ELB, "POST", "/", &headers, &body)).await;
+    assert_eq!(reply.status, 200, "{:?}: {}", fields.first(), reply.text);
+    reply
+}
+
+/// The address the cell's target is registered at, in the cell's first subnet.
+pub const CELL_TARGET: &str = "10.40.1.10";
+
+pub const EC2: Scheme = Scheme::SigV4 { signing_name: "ec2", region: "us-east-1" };
+
+/// One EC2 Query call; answers the text of the first `<answer>` element of its response.
+pub async fn ec2(router: &Router, fields: &[(&str, &str)], answer: &str) -> String {
+    let mut all = vec![("Version", "2016-11-15")];
+    all.extend_from_slice(fields);
+    let body = all
+        .iter()
+        .map(|(name, value)| format!("{}={}", segment(name), segment(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let headers = [("content-type", "application/x-www-form-urlencoded")];
+    let reply = send(router, signed_by_emulator(&EC2, "POST", "/", &headers, &body)).await;
+    assert_eq!(reply.status, 200, "{:?}: {}", fields.first(), reply.text);
+    element(&reply.text, answer)
+}
+
+/// A VPC with a subnet in each of two Availability Zones, as an Application Load Balancer
+/// needs; answers the VPC and the two subnets.
+pub async fn cell_network(router: &Router) -> (String, String, String) {
+    let vpc = ec2(router, &[("Action", "CreateVpc"), ("CidrBlock", "10.40.0.0/16")], "vpcId").await;
+    let mut subnets = Vec::new();
+    for (zone, cidr) in [("us-east-1a", "10.40.1.0/24"), ("us-east-1b", "10.40.2.0/24")] {
+        let fields = [("Action", "CreateSubnet"), ("VpcId", vpc.as_str()), ("CidrBlock", cidr), ("AvailabilityZone", zone)];
+        subnets.push(ec2(router, &fields, "subnetId").await);
+    }
+    let second = subnets.pop().expect("two subnets");
+    let first = subnets.pop().expect("two subnets");
+    (vpc, first, second)
+}
+
+/// An active Application Load Balancer whose HTTP:80 listener forwards to `127.0.0.1:<port>`;
+/// answers its ARN and its DNS name.
+pub async fn cell_load_balancer(router: &Router, engine: &InMemoryEngine, port: u16) -> (String, String) {
+    let (vpc, first, second) = cell_network(router).await;
+    let created = elb(
+        router,
+        &[
+            ("Action", "CreateLoadBalancer"),
+            ("Name", "cell-0"),
+            ("Subnets.member.1", &first),
+            ("Subnets.member.2", &second),
+        ],
+    )
+    .await;
+    let (arn, dns_name) = (element(&created.text, "LoadBalancerArn"), element(&created.text, "DNSName"));
+    let port = port.to_string();
+    let group = elb(
+        router,
+        &[
+            ("Action", "CreateTargetGroup"),
+            ("Name", "cell-0-ingress"),
+            ("Protocol", "HTTP"),
+            ("Port", &port),
+            ("VpcId", &vpc),
+            ("TargetType", "ip"),
+        ],
+    )
+    .await;
+    let group_arn = element(&group.text, "TargetGroupArn");
+    elb(
+        router,
+        &[("Action", "RegisterTargets"), ("TargetGroupArn", &group_arn), ("Targets.member.1.Id", CELL_TARGET)],
+    )
+    .await;
+    elb(
+        router,
+        &[
+            ("Action", "CreateListener"),
+            ("LoadBalancerArn", &arn),
+            ("Protocol", "HTTP"),
+            ("Port", "80"),
+            ("DefaultActions.member.1.Type", "forward"),
+            ("DefaultActions.member.1.TargetGroupArn", &group_arn),
+        ],
+    )
+    .await;
+    // The provisioning and the first health checks are owed by the clock; they are settled
+    // here rather than waited for. The target is registered at an address of the cell's VPC,
+    // as an `ip` target must be, and moved to the loopback address the echo server listens
+    // on, which is the one address this test can serve. A health check finds an `ip` target
+    // healthy when an interface of the VPC holds its address, so one is put there, as the
+    // load balancer's own forwarding tests do.
+    let ec2_state = ec2::service_state(engine).expect("the shared engine holds an EC2 inventory");
+    ec2_state
+        .lock()
+        .insert_network_interface(ec2::NetworkInterfaceSpec {
+            subnet_id: first,
+            vpc_id: vpc,
+            availability_zone: "us-east-1a".to_string(),
+            region: "us-east-1".to_string(),
+            description: "the cell's ingress".to_string(),
+            interface_type: ec2::NETWORK_INTERFACE_TYPE_INTERFACE.to_string(),
+            private_ip_addresses: vec!["127.0.0.1".to_string()],
+            ..ec2::NetworkInterfaceSpec::default()
+        })
+        .expect("the inventory holds the interface");
+    let state = engine.state::<ElbState>();
+    let mut store = state.lock();
+    let settled = SystemTime::now() - Duration::from_secs(1);
+    if let Some(record) = store.load_balancers.get_mut(&arn) {
+        record.active_at = settled;
+    }
+    for group in store.target_groups.values_mut() {
+        for target in group.targets.values_mut() {
+            target.healthy_at = settled;
+            if target.id == CELL_TARGET {
+                target.id = "127.0.0.1".to_string();
+            }
+        }
+    }
+    drop(store);
+    // The first health check still has to pass before the target takes traffic.
+    let mut state_reported = String::from("no answer");
+    for _ in 0..300 {
+        let health = elb(router, &[("Action", "DescribeTargetHealth"), ("TargetGroupArn", &group_arn)]).await;
+        state_reported = element(&health.text, "State");
+        if state_reported == "healthy" {
+            return (arn, dns_name);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the cell's target did not become healthy; its state is {state_reported}");
 }

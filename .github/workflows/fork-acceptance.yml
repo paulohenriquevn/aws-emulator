@@ -255,6 +255,16 @@ jobs:
       - name: Pods reach the emulator by name, account-prefixed included
         run: cargo test -p aws-emulator-fork-router --test emulator_hostname
 
+      - name: An Application Load Balancer relays a streamed answer as it arrives
+        # vendor/server is outside the workspace; its unit tests are pinned to the
+        # workspace's lockfile, as in the key value store step.
+        run: |
+          cp Cargo.lock vendor/server/Cargo.lock
+          CARGO_TARGET_DIR=target cargo test --manifest-path vendor/server/Cargo.toml --lib
+          rm vendor/server/Cargo.lock
+          cargo test -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
+          cargo test -p aws-emulator-fork-router --test alb_streaming_response
+
       - name: Unit tests of the workload identity patches
         run: >-
           cargo test --lib

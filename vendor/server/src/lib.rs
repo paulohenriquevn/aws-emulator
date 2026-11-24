@@ -30,6 +30,9 @@ pub mod java_truststore;
 
 mod tls_certificate_authority;
 pub use tls_certificate_authority::TlsCertificateAuthority;
+// fork: a response body relayed as it arrives (a load balancer's target answer).
+mod relayed_body;
+pub use relayed_body::{RelayError, RelayedBody, ResponseBodySlot};
 
 /// Resource-listener surfaces: the agent-facing `tcp()`/`http()` listeners a generated
 /// service opens for a resource (RDS Postgres port, API Gateway invoke URL),
@@ -1015,10 +1018,20 @@ async fn emulator_service_fallback<S: EmulatorService>(
                 .expect("a status-only response is always valid");
         }
     };
-    let emulator_req = http::Request::from_parts(parts, body_bytes);
+    let mut emulator_req = http::Request::from_parts(parts, body_bytes);
+    // fork: a plane that relays its body as it arrives leaves it here ([`ResponseBodySlot`]).
+    let relayed = ResponseBodySlot::default();
+    emulator_req.extensions_mut().insert(relayed.clone());
     let emulator_resp = service.handle_request(emulator_req).await;
-    let (resp_parts, resp_body) = emulator_resp.into_parts();
-    axum::response::Response::from_parts(resp_parts, axum::body::Body::from(resp_body))
+    let (mut resp_parts, resp_body) = emulator_resp.into_parts();
+    match relayed.take() {
+        Some(body) => {
+            // A length measured on the empty buffered body is not the relayed body's.
+            resp_parts.headers.remove(http::header::CONTENT_LENGTH);
+            axum::response::Response::from_parts(resp_parts, axum::body::Body::new(body))
+        }
+        None => axum::response::Response::from_parts(resp_parts, axum::body::Body::from(resp_body)),
+    }
 }
 
 /// Buffers a request body: declared past `limit` it is a `413` before any of it is read, past
