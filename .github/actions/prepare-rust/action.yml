@@ -1,0 +1,51 @@
+# fork: what every job of fork-acceptance.yml that compiles the workspace does first.
+name: Prepare a Rust job
+description: >-
+  Frees disk and adds swap for the large service crates, installs the stable toolchain and
+  restores the dependency cache the acceptance jobs share.
+inputs:
+  save-cache:
+    description: >-
+      Whether this job saves the dependency cache. One job saves it, the one whose
+      dependencies cover the others; the rest only restore.
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Make room for the EC2 crate
+      # The hosted runner has about 7 GB of memory; without swap, rustc on the EC2
+      # crate takes the runner down (exit 143 with no post steps).
+      shell: bash
+      run: |
+        # The build needs well over the 18 GB the runner leaves free on /: drop the
+        # preinstalled toolchains this job never uses.
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+          /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell \
+          /usr/local/share/chromium /usr/local/lib/node_modules
+        sudo docker image prune -af >/dev/null
+        sudo swapoff -a
+        sudo rm -f /swapfile /mnt/swapfile
+        sudo fallocate -l 10G /swapfile-ci
+        sudo chmod 600 /swapfile-ci
+        sudo mkswap /swapfile-ci
+        sudo swapon /swapfile-ci
+        free -h
+        df -h
+
+    - name: Install the stable Rust toolchain
+      # rustup is on the runner image; this is what dtolnay/rust-toolchain@stable ran.
+      shell: bash
+      run: |
+        rustup toolchain install stable --profile minimal --no-self-update
+        rustup default stable
+
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2 # zizmor: ignore[cache-poisoning] caches are written only by fork-acceptance.yml on PR and tag refs, which GitHub scopes apart
+      with:
+        # One cache for every job, under the key the single acceptance job used. The
+        # action caches third-party dependencies only, never the workspace's own crates,
+        # and the repository's 10 GB of cache does not fit one copy of them per job.
+        shared-key: acceptance
+        # A red run still keeps the compiled dependencies for the next one.
+        cache-on-failure: true
+        save-if: ${{ inputs.save-cache }}
