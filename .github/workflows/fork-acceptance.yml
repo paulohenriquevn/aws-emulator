@@ -1,7 +1,8 @@
 # fork: proves the gaps this fork fixes for Terraform stay fixed.
 #
-# One job, so every step reuses the same target directory: the EC2 crate alone needs
-# several GB of memory to compile, and building it twice would double the bill.
+# The Rust steps are spread over five jobs that run side by side, each compiling its own part
+# of the workspace. The EC2 crate is compiled in four of them: that costs runner minutes and
+# buys a run that ends in about an hour, where one job took two and a half to three.
 name: fork acceptance
 
 on:
@@ -22,8 +23,7 @@ on:
 
 permissions:
   contents: read
-  # The kubernetes job reads another run's emulator binary when emulator-run-id is set.
-  actions: read
+  actions: read # the kubernetes job reads another run's emulator binary (emulator-run-id)
 
 concurrency:
   group: acceptance-${{ github.ref }}
@@ -42,6 +42,7 @@ env:
 
 jobs:
   tested-tree:
+    name: tested-tree
     # Finds a run that already passed every job on this git tree (fork/ci/find-tested-run.sh),
     # leaving fork/CHANGELOG.md out of the tree (fork/ci/tested-tree.sh).
     # A promotion into main and its version tag carry the tree the pull request into develop
@@ -53,6 +54,9 @@ jobs:
       run-id: ${{ steps.lookup.outputs.run-id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
       - name: Tests of the tested-run lookup
         run: |
@@ -75,47 +79,33 @@ jobs:
             echo "Tree $tree passed in run $run_id; reusing its binaries." >>"$GITHUB_STEP_SUMMARY"
           fi
 
-  acceptance:
+  # The five Rust jobs below were one job of 34 steps that took 147 minutes, and 180 with no
+  # cache (run 45627144975). Each starts from .github/actions/prepare-rust on its own runner,
+  # so the run takes as long as the slowest of them. `acceptance`, at the end, passes only
+  # when every one of them did. The time each job is expected to take is an estimate from the
+  # step times of that run, where a step often reused crates an earlier step had compiled.
+  emulator:
+    name: emulator
+    # Builds the emulator binary the kubernetes, eks-provisioner and fixtures jobs run, then
+    # the router's integration tests, which link the same crates.
     needs: tested-tree
     if: ${{ !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
     runs-on: ubuntu-latest
-    # The run took 139 minutes on 0.4.0; a tighter limit fails a green run on a slow runner.
-    timeout-minutes: 180
+    # Expected: 45 minutes. The router's build took 20 there, after the service crates.
+    timeout-minutes: 90
     steps:
-      - name: Make room for the EC2 crate
-        # The hosted runner has about 7 GB of memory; without swap, rustc on the EC2
-        # crate takes the runner down (exit 143 with no post steps).
-        run: |
-          # The build needs well over the 18 GB the runner leaves free on /: drop the
-          # preinstalled toolchains this job never uses.
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
-            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell \
-            /usr/local/share/chromium /usr/local/lib/node_modules
-          sudo docker image prune -af >/dev/null
-          sudo swapoff -a
-          sudo rm -f /swapfile /mnt/swapfile
-          sudo fallocate -l 10G /swapfile-ci
-          sudo chmod 600 /swapfile-ci
-          sudo mkswap /swapfile-ci
-          sudo swapon /swapfile-ci
-          free -h
-          df -h
-
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          # A red run still keeps the compiled EC2 crate for the next one.
-          cache-on-failure: true
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      - uses: ./.github/actions/prepare-rust
         with:
-          terraform_version: 1.16.4
-          terraform_wrapper: false
+          # The router depends on every mounted service, so its dependencies cover the
+          # other jobs'.
+          save-cache: "true"
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 # zizmor: ignore[cache-poisoning] caches are written only by this workflow on PR and tag refs, which GitHub scopes apart
         with:
           node-version: 22
           cache: npm
@@ -134,6 +124,116 @@ jobs:
 
       - name: Console file serving tests
         run: cargo test -p aws-emulator-fork-console
+
+      - name: Build the emulator
+        run: cargo build -p aws-emulator-fork-router
+
+      - name: Keep the emulator binary
+        # So the console can be tried on a machine that cannot compile the EC2 crate.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aws-emulator-fork-linux-x64
+          path: target/debug/aws-emulator-fork
+          retention-days: 7
+
+      - name: The request body cap
+        run: cargo test -p aws-emulator-fork-router --test request_body_limit
+
+      - name: The router answers console requests before the services
+        run: cargo test -p aws-emulator-fork-router --test console_route
+
+      - name: EC2 instance state changes reach EventBridge
+        run: cargo test -p aws-emulator-fork-router --test ec2_instance_state_events
+
+      - name: An EKS managed node group runs EC2 instances
+        run: cargo test -p aws-emulator-fork-router --test eks_nodegroup_instances
+
+      - name: Workload identity for a cluster outside the emulator
+        run: >-
+          cargo test
+          -p aws-emulator-fork-router --test external_cluster_identity
+
+      - name: An EKS control plane provisioned outside the emulator
+        run: >-
+          cargo test
+          -p aws-emulator-fork-eks-control-plane
+          -p aws-emulator-fork-router --test eks_external_control_plane
+
+      - name: IAM policies are enforced on every service
+        run: >-
+          cargo test
+          -p aws-emulator-fork-iam-gate
+          -p aws-emulator-fork-router --test iam_enforcement
+
+      - name: A CloudFront key value store is read and written over SigV4A
+        run: cargo test -p aws-emulator-fork-router --test cloudfront_key_value_store
+
+      - name: A distribution runs its viewer-request CloudFront Function
+        run: cargo test -p aws-emulator-fork-router --test cloudfront_viewer_request_function
+
+      - name: Pods reach the emulator by name, account-prefixed included
+        run: cargo test -p aws-emulator-fork-router --test emulator_hostname
+
+      - name: An Application Load Balancer relays a streamed answer as it arrives
+        run: cargo test -p aws-emulator-fork-router --test alb_streaming_response
+
+      - name: A CloudFront distribution relays a streamed origin answer as it arrives
+        run: cargo test -p aws-emulator-fork-router --test cloudfront_streaming_response
+
+  tls:
+    name: tls
+    # Proves the TLS test guards its fix: red with the fix removed, green with it. Both
+    # builds recompile everything that depends on vendor/server, which is why they have a
+    # runner of their own.
+    needs: tested-tree
+    if: ${{ !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
+    runs-on: ubuntu-latest
+    # Expected: 55 minutes. The two steps took 20 there, after the router's first build.
+    timeout-minutes: 100
+    env:
+      # This job publishes no binary, so the router builds without the console bundle.
+      AWS_EMULATOR_REQUIRE_CONSOLE: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-rust
+
+      - name: The TLS test fails without the account-prefixed localhost name
+        run: |
+          sed -i '/names.insert(1, format!("{}.localhost"/d' vendor/server/src/tls_certificate_authority.rs
+          if grep -q 'names.insert(1' vendor/server/src/tls_certificate_authority.rs; then
+            echo "the mutation did not apply" >&2; exit 1
+          fi
+          # Red means THIS test failed, not that the build broke.
+          cargo test -p aws-emulator-fork-router --test tls_certificate 2>&1 | tee tls-red.log || true
+          if ! grep -q 'the_certificate_verifies_an_account_prefixed_localhost_host ... FAILED' tls-red.log; then
+            echo "the TLS test did not fail on the account-prefixed name, so it does not guard the fix" >&2
+            exit 1
+          fi
+          git restore vendor/server/src/tls_certificate_authority.rs
+
+      - name: The TLS test passes with the fix
+        run: cargo test -p aws-emulator-fork-router --test tls_certificate
+
+  patched-services:
+    name: patched-services
+    # The regression tests of the six services this fork patches, with the suites that need
+    # real PostgreSQL and Valkey containers.
+    needs: tested-tree
+    if: ${{ !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
+    runs-on: ubuntu-latest
+    # Expected: 55 minutes. The first three steps took 52 there, compiling from nothing.
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-rust
 
       - name: Regression tests for the fixed gaps
         run: >-
@@ -156,75 +256,98 @@ jobs:
           unsigned_query_calls
           target_forwarding
 
-      - name: Docker push to the ECR registry endpoint, and the request body cap
-        run: |
-          cargo test -p service-com-amazonaws-ecr-amazonec2containerregistry-v20150921 --test all registry_v2
-          cargo test -p aws-emulator-fork-router --test request_body_limit
-
       - name: RDS for PostgreSQL on real PostgreSQL containers
         run: cargo test -p service-com-amazonaws-rds-amazonrdsv19 --test all postgres_container -- --ignored --test-threads=1
 
       - name: ElastiCache for Valkey on real Valkey containers
         run: cargo test -p service-com-amazonaws-elasticache-amazonelasticachev9 --test all redis_container -- --ignored --test-threads=1
 
-      - name: The TLS test fails without the account-prefixed localhost name
-        run: |
-          sed -i '/names.insert(1, format!("{}.localhost"/d' vendor/server/src/tls_certificate_authority.rs
-          if grep -q 'names.insert(1' vendor/server/src/tls_certificate_authority.rs; then
-            echo "the mutation did not apply" >&2; exit 1
-          fi
-          # Red means THIS test failed, not that the build broke.
-          cargo test -p aws-emulator-fork-router --test tls_certificate 2>&1 | tee tls-red.log || true
-          if ! grep -q 'the_certificate_verifies_an_account_prefixed_localhost_host ... FAILED' tls-red.log; then
-            echo "the TLS test did not fail on the account-prefixed name, so it does not guard the fix" >&2
-            exit 1
-          fi
-          git restore vendor/server/src/tls_certificate_authority.rs
+      - name: The Application Load Balancer service's own suites
+        run: cargo test -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
 
-      - name: The TLS test passes with the fix
-        run: cargo test -p aws-emulator-fork-router --test tls_certificate
-
-      - name: Build the emulator
-        run: cargo build -p aws-emulator-fork-router
-
-      - name: Keep the emulator binary
-        # So the console can be tried on a machine that cannot compile the EC2 crate.
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+  patched-services-full:
+    name: patched-services-full
+    # Every test of the six patched services. It compiles what patched-services compiles, on
+    # another runner, because running the suites takes as long as compiling them.
+    needs: tested-tree
+    if: ${{ !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
+    runs-on: ubuntu-latest
+    # Expected: 55 minutes. The step took 26 to 29 in earlier runs, after 28 of compiling.
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          name: aws-emulator-fork-linux-x64
-          path: target/debug/aws-emulator-fork
-          retention-days: 7
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
-      - name: The router answers console requests before the services
-        run: cargo test -p aws-emulator-fork-router --test console_route
+      - uses: ./.github/actions/prepare-rust
 
-      - name: EC2 instance state changes reach EventBridge
-        run: cargo test -p aws-emulator-fork-router --test ec2_instance_state_events
-
-      - name: An EKS managed node group runs EC2 instances
-        run: cargo test -p aws-emulator-fork-router --test eks_nodegroup_instances
-
-      - name: Workload identity for a cluster outside the emulator
+      - name: Full test suites of the patched services
         run: >-
-          cargo test
-          -p aws-emulator-fork-router --test external_cluster_identity
+          cargo test --no-fail-fast
+          -p service-com-amazonaws-ec2-amazonec2
+          -p service-com-amazonaws-acm-certificatemanager
+          -p service-com-amazonaws-ssm-amazonssm
+          -p service-com-amazonaws-rds-amazonrdsv19
+          -p service-com-amazonaws-elasticache-amazonelasticachev9
+          -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
 
-      - name: An EKS control plane provisioned outside the emulator
-        run: >-
-          cargo test
-          -p aws-emulator-fork-eks-control-plane
-          -p aws-emulator-fork-router --test eks_external_control_plane
+  service-suites:
+    name: service-suites
+    # The suites of the other services the fork changed (ECR, S3, EKS, CloudFront, STS, EKS
+    # Auth) and of vendor/server. None of them compiles the router.
+    needs: tested-tree
+    if: ${{ !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
+    runs-on: ubuntu-latest
+    # Expected: 50 minutes. These steps took 40 there, some on crates already compiled.
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-rust
+
+      - name: Docker push to the ECR registry endpoint
+        run: cargo test -p service-com-amazonaws-ecr-amazonec2containerregistry-v20150921 --test all registry_v2
+
+      - name: The S3 object store ceilings come from the environment
+        # The whole S3 suite: every write path reads the ceilings through the functions the
+        # environment sets, and the suites that fill a bucket to its ceiling prove the
+        # defaults still refuse.
+        run: |
+          cargo test -p service-com-amazonaws-s3-amazons3 --lib
+          cargo test -p service-com-amazonaws-s3-amazons3 --test all
 
       - name: The EKS certificate authority keeps its signing key
         run: >-
           cargo test -p service-com-amazonaws-eks-awswesleyfrontend --lib --
           control_plane_provisioning certificate_material
 
-      - name: IAM policies are enforced on every service
-        run: >-
-          cargo test
-          -p aws-emulator-fork-iam-gate
-          -p aws-emulator-fork-router --test iam_enforcement
+      - name: Unit tests of vendor/server
+        # vendor/server is outside the workspace, so its unit tests build on their own,
+        # pinned to the workspace's lockfile. The first command is the SigV4A verification
+        # a CloudFront key value store is read and written with; the second is every unit
+        # test, the Application Load Balancer's relay among them.
+        run: |
+          cp Cargo.lock vendor/server/Cargo.lock
+          CARGO_TARGET_DIR=target cargo test --manifest-path vendor/server/Cargo.toml --lib -- request_authentication extract_akid
+          CARGO_TARGET_DIR=target cargo test --manifest-path vendor/server/Cargo.toml --lib
+          rm vendor/server/Cargo.lock
+
+      - name: A distribution runs its viewer-request CloudFront Function
+        run: |
+          cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --lib -- function_runtime edge::viewer_request edge::tests::an_alias_
+          cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --test all -- edge_viewer_request_function function_test_run edge_data_plane::a_wildcard_alias
+
+      - name: A CloudFront distribution relays a streamed origin answer as it arrives
+        # The edge's unit tests and its data plane and published address suites, which serve
+        # through the in-process transport the relay changed. The streaming cases end to
+        # end are the router's, in the emulator job.
+        run: |
+          cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --lib -- edge
+          cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --test all -- edge_ published_edge_address
 
       - name: Unit tests of the workload identity patches
         run: >-
@@ -234,30 +357,55 @@ jobs:
           -p service-com-amazonaws-eksauth-eksauthfrontend
           -p service-com-amazonaws-sts-awssecuritytokenservicev20110615
 
+  fixtures:
+    name: fixtures
+    # The console in a browser and the Terraform fixtures, against the binary the emulator
+    # job built. Nothing is compiled here.
+    needs: [tested-tree, emulator]
+    if: ${{ !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
+    runs-on: ubuntu-latest
+    # Expected: 15 minutes. The two steps took 14 there.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 # zizmor: ignore[cache-poisoning] caches are written only by this workflow on PR and tag refs, which GitHub scopes apart
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fork/console/web/package-lock.json
+
+      - name: Fetch the emulator binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: aws-emulator-fork-linux-x64
+          path: ${{ runner.temp }}/bin
+
       - name: Console end to end against the emulator
         working-directory: fork/console/web
         env:
-          EMULATOR_BIN: ${{ github.workspace }}/target/debug/aws-emulator-fork
+          EMULATOR_BIN: ${{ runner.temp }}/bin/aws-emulator-fork
           CONSOLE_E2E_HOME: ${{ runner.temp }}/console-e2e
         run: |
+          chmod +x "$EMULATOR_BIN"
+          npm ci
           npx playwright install --with-deps chromium
           npm run e2e
 
       - name: Terraform acceptance fixtures
         env:
           ACCEPTANCE_WORK: ${{ runner.temp }}/acceptance
-        run: fork/acceptance/run.sh target/debug/aws-emulator-fork
-
-      - name: Full test suites of the patched services
-        if: ${{ !cancelled() }}
-        run: >-
-          cargo test --no-fail-fast
-          -p service-com-amazonaws-ec2-amazonec2
-          -p service-com-amazonaws-acm-certificatemanager
-          -p service-com-amazonaws-ssm-amazonssm
-          -p service-com-amazonaws-rds-amazonrdsv19
-          -p service-com-amazonaws-elasticache-amazonelasticachev9
-          -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/aws-emulator-fork"
+          fork/acceptance/run.sh "$RUNNER_TEMP/bin/aws-emulator-fork"
 
       - name: Keep the acceptance logs
         if: ${{ !cancelled() }}
@@ -271,15 +419,35 @@ jobs:
             ${{ runner.temp }}/console-e2e/emulator.log
           if-no-files-found: ignore
 
+  acceptance:
+    name: acceptance
+    # Passes only when every job above passed. mark-tested and release read this job's
+    # result, so a tree counts as tested (fork/ci/find-tested-run.sh) only then.
+    needs: [tested-tree, emulator, tls, patched-services, patched-services-full, service-suites, fixtures]
+    if: ${{ !cancelled() && !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every acceptance job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null
+
   kubernetes:
+    name: kubernetes
     # Real controllers and real workload identity in a kind cluster that signs as the
-    # emulator's EKS cluster (fork/kubernetes/run.sh), on the binary the acceptance job built.
-    needs: [tested-tree, acceptance]
-    if: ${{ !cancelled() && !needs.tested-tree.outputs.run-id && (needs.acceptance.result == 'success' || inputs.emulator-run-id) }}
+    # emulator's EKS cluster (fork/kubernetes/run.sh), on the binary the emulator job built.
+    needs: [tested-tree, emulator]
+    if: ${{ !cancelled() && !needs.tested-tree.outputs.run-id && (needs.emulator.result == 'success' || inputs.emulator-run-id) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
       - name: Install kind
         run: |
@@ -322,18 +490,18 @@ jobs:
           if-no-files-found: ignore
 
   eks-provisioner:
+    name: eks-provisioner
     # EKS clusters whose control plane and nodes the provisioner runs in kind, created and
     # reached through the EKS API alone (fork/eks-provisioner/e2e.sh), on the binary the
-    # acceptance job built.
-    needs: [tested-tree, acceptance]
-    if: ${{ !cancelled() && !needs.tested-tree.outputs.run-id && (needs.acceptance.result == 'success' || inputs.emulator-run-id) }}
+    # emulator job built.
+    needs: [tested-tree, emulator]
+    if: ${{ !cancelled() && !needs.tested-tree.outputs.run-id && (needs.emulator.result == 'success' || inputs.emulator-run-id) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
-      # The copy of the pod identity webhook image below.
-      packages: write
+      actions: read # the emulator binary the emulator job, or an earlier run, built
+      packages: write # the copy of the pod identity webhook image below
     env:
       # ECR Public answers the shared addresses of GitHub's runners with 429 "Data limit
       # exceeded", so the clusters here run a copy of the webhook image on GHCR: the same
@@ -343,8 +511,11 @@ jobs:
       WEBHOOK_COPY: ghcr.io/${{ github.repository_owner }}/amazon-eks-pod-identity-webhook
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 # zizmor: ignore[cache-poisoning] caches are written only by this workflow on PR and tag refs, which GitHub scopes apart
         with:
           go-version-file: fork/eks-provisioner/go.mod
           cache-dependency-path: fork/eks-provisioner/go.sum
@@ -417,6 +588,7 @@ jobs:
           if-no-files-found: ignore
 
   mark-tested:
+    name: mark-tested
     # Records that every job passed on this tree, for tested-tree in later runs. It keeps as
     # long as the emulator binary it vouches for.
     needs: [tested-tree, acceptance, kubernetes, eks-provisioner]
@@ -425,7 +597,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Write the marker
-        run: echo "${{ needs.tested-tree.outputs.tree }}" >"$RUNNER_TEMP/tested-tree"
+        env:
+          TREE: ${{ needs.tested-tree.outputs.tree }}
+        run: echo "$TREE" >"$RUNNER_TEMP/tested-tree"
 
       - name: Keep the marker
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -435,6 +609,7 @@ jobs:
           retention-days: 7
 
   release:
+    name: release
     # Publishes, for a version tag, the emulator binary that passed every job, with its
     # SHA-256, on the GitHub release of that tag. The binaries come from this run, or from the
     # earlier run that tested the same tree. The notes are the version's section of
@@ -447,11 +622,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
-      # The binaries of an earlier run.
-      actions: read
+      contents: write # creates the GitHub release and uploads its binaries
+      actions: read # the binaries of an earlier run
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes: gh and crane authenticate with GH_TOKEN.
+          persist-credentials: false
 
       - name: Fetch the tested emulator binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

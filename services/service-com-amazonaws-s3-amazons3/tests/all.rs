@@ -281,6 +281,8 @@ mod object_scoped_refusal_envelope;
 mod object_select_content;
 #[path = "all/object_storage.rs"]
 mod object_storage;
+#[path = "all/object_store_limits_from_environment.rs"]
+mod object_store_limits_from_environment;
 #[path = "all/object_subresource_version_id.rs"]
 mod object_subresource_version_id;
 #[path = "all/object_tag_set_removal.rs"]

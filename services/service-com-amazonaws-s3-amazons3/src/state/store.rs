@@ -41,7 +41,7 @@ pub struct ComAmazonawsS3Amazons3State {
     /// What the objects AWS publishes ([`aws_published`]) retain, and how many stored
     /// versions they are, measured ONCE when the store was seeded with them.
     ///
-    /// The whole-store ceilings ([`MAX_OBJECTS_TOTAL`] / [`MAX_OBJECT_BYTES_TOTAL`]) bound
+    /// The whole-store ceilings ([`max_objects_total`] / [`max_object_bytes_total`]) bound
     /// what this process holds because a CALLER asked it to, and the published catalog is
     /// fixed by the code rather than by anything a caller does — so this fixed amount is
     /// subtracted from the store's footprint ([`Self::caller_retained_bytes`] /
@@ -565,7 +565,7 @@ impl ComAmazonawsS3Amazons3State {
     }
 
     /// How many stored versions the caller-stored half of this store holds, which is what
-    /// [`MAX_OBJECTS_TOTAL`] bounds: every version in the store, less the published
+    /// [`max_objects_total`] bounds: every version in the store, less the published
     /// catalog's own ([`Self::published_allowance`]).
     pub(super) fn caller_stored_versions(&self) -> usize {
         let (_, versions) = self.published_allowance();
@@ -577,7 +577,7 @@ impl ComAmazonawsS3Amazons3State {
     }
 
     /// How many bytes the caller-stored half of this store retains, which is what
-    /// [`MAX_OBJECT_BYTES_TOTAL`] bounds: everything the store retains, less the published
+    /// [`max_object_bytes_total`] bounds: everything the store retains, less the published
     /// catalog's own ([`Self::published_allowance`]).
     pub(super) fn caller_retained_bytes(&self) -> usize {
         let (bytes, _) = self.published_allowance();
@@ -637,8 +637,8 @@ impl ComAmazonawsS3Amazons3State {
     /// This is the ONLY way an object is recorded, because it is the only place that can
     /// see BOTH the per-bucket ceilings and the service-wide ones: the per-bucket pair
     /// alone would leave the store bounded only by their product with
-    /// [`MAX_BUCKETS_PER_ACCOUNT`], so the whole-store checks here ([`MAX_OBJECTS_TOTAL`]
-    /// and [`MAX_OBJECT_BYTES_TOTAL`]) are what bound this process's object memory
+    /// [`MAX_BUCKETS_PER_ACCOUNT`], so the whole-store checks here ([`max_objects_total`]
+    /// and [`max_object_bytes_total`]) are what bound this process's object memory
     /// whatever a caller does. Nothing is written unless the answer is
     /// [`ObjectWrite::Created`] or [`ObjectWrite::Replaced`]; a refusal leaves every
     /// stored object exactly as it was, and mints nothing.
@@ -691,7 +691,7 @@ impl ComAmazonawsS3Amazons3State {
         // of the store ([`Self::caller_retained_bytes`]), which is what these budgets
         // bound; a write into a bucket AWS publishes counts here like any other.
         let held_versions: usize = self.caller_stored_versions();
-        if (keeps || !held) && held_versions >= MAX_OBJECTS_TOTAL {
+        if (keeps || !held) && held_versions >= max_objects_total() {
             return Some(ObjectWrite::TotalObjectCountReached);
         }
         // The id is minted before the budgets are measured, so the bytes it retains are
@@ -723,7 +723,7 @@ impl ComAmazonawsS3Amazons3State {
             .sum::<usize>()
             .saturating_sub(published_bytes)
             + incoming;
-        if would_hold > MAX_OBJECT_BYTES_TOTAL {
+        if would_hold > max_object_bytes_total() {
             return Some(ObjectWrite::TotalByteBudgetReached { would_hold });
         }
 
@@ -765,7 +765,7 @@ impl ComAmazonawsS3Amazons3State {
     /// caller's to choose: how many destinations the stored configuration names and how
     /// large the object is. At most
     /// [`MAX_REPLICATION_DESTINATIONS_PER_WRITE`] copies are made and at most
-    /// [`MAX_REPLICATION_BYTES_PER_WRITE`] bytes are copied in one call, and the FIRST copy
+    /// [`max_replication_bytes_per_write`] bytes are copied in one call, and the FIRST copy
     /// the store refuses ends the fan-out rather than letting every further destination pay
     /// for a copy that cannot be stored. A write past either ceiling records
     /// [`REPLICATION_STATUS_FAILED`], which is what the source version then reports: the
@@ -818,7 +818,7 @@ impl ComAmazonawsS3Amazons3State {
             }
             // The byte ceiling is consulted BEFORE the copy is made, so the bytes this one
             // call copies are bounded whatever the configuration asks for.
-            if copied_bytes.saturating_add(body_bytes) > MAX_REPLICATION_BYTES_PER_WRITE {
+            if copied_bytes.saturating_add(body_bytes) > max_replication_bytes_per_write() {
                 every_copy_made = false;
                 break;
             }
@@ -998,8 +998,8 @@ impl ComAmazonawsS3Amazons3State {
     /// retained are released with it.
     ///
     /// This is the ONLY way a part is recorded, because it is the only place that can see
-    /// BOTH the per-bucket byte budget ([`MAX_OBJECT_BYTES_PER_BUCKET`]) and the
-    /// service-wide one ([`MAX_OBJECT_BYTES_TOTAL`]) — the same two budgets a stored
+    /// BOTH the per-bucket byte budget ([`max_object_bytes_per_bucket`]) and the
+    /// service-wide one ([`max_object_bytes_total`]) — the same two budgets a stored
     /// object is measured against, since a retained part holds this process's memory the
     /// same way. Nothing is written unless the answer is [`PartUpload::Stored`].
     pub fn upload_part(
@@ -1026,7 +1026,7 @@ impl ComAmazonawsS3Amazons3State {
         let incoming = part.retained_bytes();
 
         let would_hold_in_bucket = held_bucket.retained_bytes().saturating_sub(released) + incoming;
-        if would_hold_in_bucket > MAX_OBJECT_BYTES_PER_BUCKET {
+        if would_hold_in_bucket > max_object_bytes_per_bucket() {
             return Some(PartUpload::ByteBudgetReached {
                 would_hold: would_hold_in_bucket,
             });
@@ -1038,7 +1038,7 @@ impl ComAmazonawsS3Amazons3State {
             .caller_retained_bytes()
             .saturating_sub(released)
             + incoming;
-        if would_hold > MAX_OBJECT_BYTES_TOTAL {
+        if would_hold > max_object_bytes_total() {
             return Some(PartUpload::TotalByteBudgetReached { would_hold });
         }
 
@@ -1302,14 +1302,14 @@ impl ComAmazonawsS3Amazons3State {
         let released = tag_set_bytes(&object.tags);
         let taken = tag_set_bytes(&tags);
         let would_hold = held.retained_bytes().saturating_sub(released) + taken;
-        if would_hold > MAX_OBJECT_BYTES_PER_BUCKET {
+        if would_hold > max_object_bytes_per_bucket() {
             return Some(ObjectTagWrite::ByteBudgetReached { would_hold });
         }
         let total_would_hold = self
             .caller_retained_bytes()
             .saturating_sub(released)
             + taken;
-        if total_would_hold > MAX_OBJECT_BYTES_TOTAL {
+        if total_would_hold > max_object_bytes_total() {
             return Some(ObjectTagWrite::TotalByteBudgetReached {
                 would_hold: total_would_hold,
             });
@@ -1369,14 +1369,14 @@ impl ComAmazonawsS3Amazons3State {
             .as_ref()
             .map_or(0, ObjectRetention::retained_bytes);
         let would_hold = held.retained_bytes().saturating_sub(released) + taken;
-        if would_hold > MAX_OBJECT_BYTES_PER_BUCKET {
+        if would_hold > max_object_bytes_per_bucket() {
             return Some(ObjectRetentionWrite::ByteBudgetReached { would_hold });
         }
         let total_would_hold = self
             .caller_retained_bytes()
             .saturating_sub(released)
             + taken;
-        if total_would_hold > MAX_OBJECT_BYTES_TOTAL {
+        if total_would_hold > max_object_bytes_total() {
             return Some(ObjectRetentionWrite::TotalByteBudgetReached {
                 would_hold: total_would_hold,
             });
@@ -1428,11 +1428,11 @@ impl ComAmazonawsS3Amazons3State {
         let released = object.encryption.retained_bytes();
         let taken = encryption.retained_bytes();
         let would_hold = held.retained_bytes().saturating_sub(released) + taken;
-        if would_hold > MAX_OBJECT_BYTES_PER_BUCKET {
+        if would_hold > max_object_bytes_per_bucket() {
             return Some(ObjectEncryptionWrite::ByteBudgetReached { would_hold });
         }
         let total_would_hold = self.caller_retained_bytes().saturating_sub(released) + taken;
-        if total_would_hold > MAX_OBJECT_BYTES_TOTAL {
+        if total_would_hold > max_object_bytes_total() {
             return Some(ObjectEncryptionWrite::TotalByteBudgetReached {
                 would_hold: total_would_hold,
             });
@@ -1514,11 +1514,11 @@ impl ComAmazonawsS3Amazons3State {
         let released = acl_grants_bytes(object.acl.as_deref().unwrap_or_default());
         let taken = acl_grants_bytes(&grants);
         let would_hold = held.retained_bytes().saturating_sub(released) + taken;
-        if would_hold > MAX_OBJECT_BYTES_PER_BUCKET {
+        if would_hold > max_object_bytes_per_bucket() {
             return Some(ObjectAclWrite::ByteBudgetReached { would_hold });
         }
         let total_would_hold = self.caller_retained_bytes().saturating_sub(released) + taken;
-        if total_would_hold > MAX_OBJECT_BYTES_TOTAL {
+        if total_would_hold > max_object_bytes_total() {
             return Some(ObjectAclWrite::TotalByteBudgetReached {
                 would_hold: total_would_hold,
             });
@@ -1576,14 +1576,14 @@ impl ComAmazonawsS3Amazons3State {
             .map_or(0, ObjectRestore::retained_bytes);
         let taken = restore.retained_bytes();
         let would_hold = held.retained_bytes().saturating_sub(released) + taken;
-        if would_hold > MAX_OBJECT_BYTES_PER_BUCKET {
+        if would_hold > max_object_bytes_per_bucket() {
             return Some(ObjectRestoreWrite::ByteBudgetReached { would_hold });
         }
         let total_would_hold = self
             .caller_retained_bytes()
             .saturating_sub(released)
             + taken;
-        if total_would_hold > MAX_OBJECT_BYTES_TOTAL {
+        if total_would_hold > max_object_bytes_total() {
             return Some(ObjectRestoreWrite::TotalByteBudgetReached {
                 would_hold: total_would_hold,
             });
@@ -1648,14 +1648,14 @@ impl ComAmazonawsS3Amazons3State {
         let taken = annotation.retained_bytes()
             + if replaces.is_none() { name.len() } else { 0 };
         let would_hold = held.retained_bytes().saturating_sub(released) + taken;
-        if would_hold > MAX_OBJECT_BYTES_PER_BUCKET {
+        if would_hold > max_object_bytes_per_bucket() {
             return Some(AnnotationWrite::ByteBudgetReached { would_hold });
         }
         let total_would_hold = self
             .caller_retained_bytes()
             .saturating_sub(released)
             + taken;
-        if total_would_hold > MAX_OBJECT_BYTES_TOTAL {
+        if total_would_hold > max_object_bytes_total() {
             return Some(AnnotationWrite::TotalByteBudgetReached {
                 would_hold: total_would_hold,
             });
@@ -1886,7 +1886,7 @@ impl ComAmazonawsS3Amazons3State {
     /// marker it lays, exactly as a write mints one for the version it stores.
     ///
     /// A marker is a stored version, so it is bounded like one: this refuses to lay it
-    /// once the whole store holds [`MAX_OBJECTS_TOTAL`] versions, and the per-bucket
+    /// once the whole store holds [`max_objects_total`] versions, and the per-bucket
     /// ceiling is checked inside. Nothing is written when the answer is a ceiling.
     pub fn remove_object(&mut self, bucket: &str, key: &str) -> Option<ObjectDeletion> {
         let held = self.buckets.get(bucket)?;
@@ -1899,7 +1899,7 @@ impl ComAmazonawsS3Amazons3State {
             && (versioned || held.null_version_position(key).is_none());
         if adds_version {
             let held_versions: usize = self.caller_stored_versions();
-            if held_versions >= MAX_OBJECTS_TOTAL {
+            if held_versions >= max_objects_total() {
                 return Some(ObjectDeletion::TotalVersionCountReached);
             }
         }

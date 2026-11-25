@@ -24,12 +24,23 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
-aws-sigv4 = { version = "1", features = ["http1"] }
+# fork: `sigv4a` derives the key pair a SigV4A signature is verified with.
+aws-sigv4 = { version = "1", features = ["http1", "sigv4a"] }
 aws-credential-types = "1"
 aws-lc-rs = "1"
+# fork: a SigV4A signature is hex-encoded DER.
+hex = "0.4"
 percent-encoding = "2"
 time = { version = "0.3.55", default-features = false, features = ["parsing", "std"] }
 yasna = "0.5"
 emulator-paths = { path = "../emulator-paths", package = "aws-emulator-emulator-paths", version = "*" }
 emulator-telemetry = { path = "../emulator-telemetry", package = "aws-emulator-emulator-telemetry", version = "*" }
 aws-smithy-schema-server = { path = "../smithy-schema-server", package = "aws-emulator-smithy-schema-server", version = "*" }
+
+# fork: the crate is vendored without the dev-dependencies its unit tests use. The root
+# workspace excludes it, so its tests run on their own:
+# `cargo test --manifest-path vendor/server/Cargo.toml --lib`.
+[dev-dependencies]
+assert2 = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["full", "test-util"] }

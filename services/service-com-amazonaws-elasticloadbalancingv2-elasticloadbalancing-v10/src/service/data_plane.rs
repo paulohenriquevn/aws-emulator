@@ -808,7 +808,10 @@ pub async fn serve<Eng: Send + Sync + 'static>(
                         );
                         return rendered(&Served::status(TARGET_UNREACHABLE_STATUS));
                     };
-                    super::target_proxy::served(engine, &proxied, &request, body).await
+                    // A listener that writes the answer as it arrives left a slot for the
+                    // target's body; a request made in process carries none.
+                    let relayed = req.extension::<::emulator_server::ResponseBodySlot>();
+                    super::target_proxy::served(engine, &proxied, &request, body, relayed).await
                 }
             }
         }
@@ -1494,6 +1497,7 @@ fn forward(
         guarding_group_ids: target.guarded_by.to_vec(),
         source_group_ids: serving.map(|lb| lb.security_groups.clone()).unwrap_or_default(),
         source_interface_ids: serving.map(|lb| lb.network_interface_ids.clone()).unwrap_or_default(),
+        idle_timeout: serving.map_or(crate::state::DEFAULT_IDLE_TIMEOUT, |lb| lb.idle_timeout()),
         set_cookie: (distribution.sticky && pinned.is_none()).then(|| {
             super::target_group_selection::set_cookie(
                 &group.arn,

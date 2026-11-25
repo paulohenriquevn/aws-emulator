@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! SigV4 request authentication, switched by [`authentication_enabled`].
 //! A request is verified by signing it again with `aws-sigv4`, the SDK's own signer.
+//! fork: a SigV4A request is verified against the public key of its credential instead
+//! (`request_authentication_sigv4a.rs`), since an ECDSA signature cannot be made again.
 //! `MultiServiceRouter::new` decides once whether to enforce it; the serve path then
 //! publishes the keys of [`SigV4Authenticator::minted_credentials`].
 
@@ -17,6 +19,9 @@ const X_AMZ_DATE: &str = "x-amz-date";
 const X_AMZ_CONTENT_SHA256: &str = "x-amz-content-sha256";
 const HEX_ALPHABET: &[u8] = b"0123456789ABCDEF";
 const SIGV4_ALGORITHM: &str = "AWS4-HMAC-SHA256";
+/// fork: SigV4A, which SDKs sign multi-region APIs with (the CloudFront KeyValueStore data
+/// plane, S3 Multi-Region Access Points). Verified with the same credentials as SigV4.
+const SIGV4A_ALGORITHM: &str = "AWS4-ECDSA-P256-SHA256";
 
 /// The query fields of a presigned URL that the signer adds back itself.
 /// Seven days, the longest validity AWS accepts for a presigned URL.
@@ -189,7 +194,7 @@ impl RequestAuthenticator for SigV4Authenticator {
             .and_then(|h| h.to_str().ok());
         header.map_or_else(
             || presigned_field(parts, "X-Amz-Algorithm").is_some_and(|a| a == SIGV4_ALGORITHM),
-            |header| header.starts_with(&format!("{SIGV4_ALGORITHM} ")),
+            |header| algorithm_of(header).is_some(),
         )
     }
 
@@ -205,14 +210,20 @@ impl RequestAuthenticator for SigV4Authenticator {
             crate::normalize_service_key(service) == serving_signing_name
                 || (signs_like_s3(service) && signs_like_s3(serving_signing_name))
         };
-        let scoped_key_id = match &signed.scope[..] {
-            [key_id, _, _, service, terminator]
+        // fork: a SigV4A scope has no region field; the region set it covers is the signed
+        // `X-Amz-Region-Set` header. Any region is served, as the SigV4 region is not checked.
+        let scoped_key_id = match (signed.algorithm, &signed.scope[..]) {
+            (SIGV4_ALGORITHM, [key_id, _, _, service, terminator])
+            | (SIGV4A_ALGORITHM, [key_id, _, service, terminator])
                 if signed_for_serving(service) && terminator == "aws4_request" =>
             {
                 Some(key_id)
             }
             _ => None,
         };
+        if signed.algorithm == SIGV4A_ALGORITHM && !sigv4a::region_set_signed(parts, &signed) {
+            return Err(ACCESS_DENIED);
+        }
         let expired = signed.expires_secs.is_some_and(|secs| {
             if secs > MAX_PRESIGNED_EXPIRES_SECS {
                 return true;
@@ -238,8 +249,12 @@ impl RequestAuthenticator for SigV4Authenticator {
         }
         let secret = self.secret_for(key_id, credentials)?;
         own_session_token_presented(parts, key_id, credentials)?;
-        let expected = self.signature_for(parts, body, &signed, &secret);
-        let matches = expected.is_some_and(|expected| same_secret(&expected, &signed.value));
+        let matches = if signed.algorithm == SIGV4A_ALGORITHM {
+            sigv4a::signature_matches(parts, body, &signed, key_id, &secret)
+        } else {
+            let expected = self.signature_for(parts, body, &signed, &secret);
+            expected.is_some_and(|expected| same_secret(&expected, &signed.value))
+        };
         let chunks_match =
             || !streams_signed_chunks(parts) || chunk_signatures_match(body, &signed, &secret);
         (matches && chunks_match())
@@ -250,6 +265,8 @@ impl RequestAuthenticator for SigV4Authenticator {
 
 /// The SigV4 fields of a request, from its `Authorization` header or else its presigned query.
 struct Signature {
+    /// fork: [`SIGV4_ALGORITHM`], or [`SIGV4A_ALGORITHM`] for an `Authorization` header.
+    algorithm: &'static str,
     scope: Vec<String>,
     headers: Vec<String>,
     value: String,
@@ -260,6 +277,10 @@ struct Signature {
 impl Signature {
     fn of(parts: &Parts) -> Option<Self> {
         let header = parts.headers.get(http::header::AUTHORIZATION);
+        let algorithm = match header {
+            Some(header) => algorithm_of(header.to_str().ok()?)?,
+            None => SIGV4_ALGORITHM,
+        };
         let field = |name: &str| match header {
             Some(header) => authorization_field(header.to_str().ok()?, name),
             None => presigned_field(parts, &format!("X-Amz-{name}")),
@@ -279,6 +300,7 @@ impl Signature {
         let headers = split(field("SignedHeaders")?, ';');
         let value = field("Signature")?;
         Some(Self {
+            algorithm,
             scope,
             headers,
             value,
@@ -287,14 +309,24 @@ impl Signature {
         })
     }
 
-    /// The signing name the request's credential scope names (`key/date/region/name/aws4_request`).
+    /// The signing name the request's credential scope names (`key/date/region/name/aws4_request`,
+    /// or SigV4A's `key/date/name/aws4_request`).
     fn signing_name(&self) -> &str {
-        self.scope.get(3).map_or("", String::as_str)
+        let at = if self.algorithm == SIGV4A_ALGORITHM { 2 } else { 3 };
+        self.scope.get(at).map_or("", String::as_str)
     }
 }
 
+/// fork: the algorithm an `Authorization` header names, of those this verifies.
+fn algorithm_of(header: &str) -> Option<&'static str> {
+    [SIGV4_ALGORITHM, SIGV4A_ALGORITHM].into_iter().find(|algorithm| {
+        let fields = header.strip_prefix(algorithm);
+        fields.is_some_and(|fields| fields.starts_with(' '))
+    })
+}
+
 fn authorization_field(header: &str, name: &str) -> Option<String> {
-    let fields = header.strip_prefix(SIGV4_ALGORITHM)?.strip_prefix(' ')?;
+    let fields = header.strip_prefix(algorithm_of(header)?)?.strip_prefix(' ')?;
     let mut fields = fields.split(',');
     let value = fields.find_map(|field| field.trim().strip_prefix(name)?.strip_prefix('='));
     value.map(str::to_string)
@@ -665,6 +697,10 @@ impl Drop for EmulatorFile {
         let _ = std::fs::remove_file(&self.0);
     }
 }
+
+// fork: SigV4A verification.
+#[path = "request_authentication_sigv4a.rs"]
+mod sigv4a;
 
 #[cfg(test)]
 #[path = "request_authentication_tests.rs"]

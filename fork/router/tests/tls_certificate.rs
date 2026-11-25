@@ -36,6 +36,19 @@ fn the_certificate_verifies_an_account_prefixed_localhost_host() {
     assert!(verifies("000000000000.localhost"));
 }
 
+/// Pods of an EKS cluster reach the emulator as `aws.emulator.internal`, which the
+/// eks-provisioner maps to the gateway in their `/etc/hosts`, and an SDK there prefixes it
+/// with the account id as it prefixes `localhost`.
+#[test]
+fn the_certificate_verifies_the_name_pods_reach_the_emulator_by() {
+    assert!(verifies("aws.emulator.internal"));
+}
+
+#[test]
+fn the_certificate_verifies_the_account_prefixed_name_pods_reach_the_emulator_by() {
+    assert!(verifies("000000000000.aws.emulator.internal"));
+}
+
 #[test]
 fn the_certificate_still_refuses_a_host_it_does_not_name() {
     assert!(!verifies("emulator.example.org"));

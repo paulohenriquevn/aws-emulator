@@ -3420,11 +3420,18 @@ struct SmithyServiceOpts {
     /// `"com.amazonaws.kms#TrentService"`).
     service: String,
     /// Path to the Rust module that holds operation input/output types.
+    ///
+    /// fork: accepted, and not read. The expansion names each operation as
+    /// `crate::ops::{op}::{Op}`, whose `impl Operation` carries its input, output
+    /// and error types, so no module path is needed. The generated service
+    /// declarations still pass it, and darling refuses an unknown argument.
+    #[allow(dead_code)]
     types: syn::Path,
-    /// Path to the Rust module that holds the per-operation error enums
-    /// (`<Op>Error`). Defaults to `crate::errors` — set this to override
-    /// when your error module lives elsewhere (e.g. `crate::server::proto::errors`).
+    /// Path to the Rust module that holds the per-operation error enums.
+    ///
+    /// fork: accepted, and not read, for the reason `types` is not.
     #[darling(default)]
+    #[allow(dead_code)]
     errors: Option<syn::Path>,
     /// Workspace-relative path to the Smithy model JSON. Required.
     #[darling(default)]
@@ -3833,11 +3840,6 @@ fn smithy_service_impl(
     let opts = SmithyServiceOpts::from_list(&attr_list)
         .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(), e.to_string()))?;
 
-    let errors_path: syn::Path = match opts.errors.clone() {
-        Some(p) => p,
-        None => syn::parse_quote! { ::smithy_server_runtime::errors },
-    };
-
     // The author's struct ident is deliberately ignored: the generated carrier
     // is always the fixed-name `ServiceDefinition`. Only the author's visibility is
     // carried onto it.
@@ -4081,8 +4083,6 @@ fn smithy_service_impl(
     //                     there is no per-op struct field or field init.
     let mut op_items: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut table_inits: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    let types_path = &opts.types;
 
     for op_target in &operation_targets {
         let op_target = op_target.as_str();

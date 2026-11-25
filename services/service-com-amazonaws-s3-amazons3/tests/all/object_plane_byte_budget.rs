@@ -22,7 +22,7 @@
 //! holding several times it.
 
 use service_com_amazonaws_s3_amazons3::state::{
-    MAX_OBJECT_BYTES_PER_BUCKET, MAX_OBJECT_BYTES_TOTAL,
+    DEFAULT_MAX_OBJECT_BYTES_PER_BUCKET, DEFAULT_MAX_OBJECT_BYTES_TOTAL,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -181,8 +181,8 @@ async fn the_budgets_are_above_the_traffic_aws_accepts() {
     // The structural half of the same rule: the budgets that bound this process's memory are
     // sized above an ordinary session's multipart traffic — several files of this size in one
     // bucket, and several such buckets — so no write AWS accepts meets them on the way.
-    let bucket_allowance = MAX_OBJECT_BYTES_PER_BUCKET;
-    let store_allowance = MAX_OBJECT_BYTES_TOTAL;
+    let bucket_allowance = DEFAULT_MAX_OBJECT_BYTES_PER_BUCKET;
+    let store_allowance = DEFAULT_MAX_OBJECT_BYTES_TOTAL;
     assert!(
         bucket_allowance >= 4 * FILE_BYTES,
         "case \"one bucket's allowance\": it must take several files of {FILE_BYTES} bytes, \

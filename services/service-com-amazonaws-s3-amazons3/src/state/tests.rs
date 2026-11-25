@@ -693,7 +693,7 @@ fn a_removal_reports_what_it_released_and_frees_the_byte_budget() {
     // and less the empty object's own overhead.
     let overhead = object(0).retained_bytes();
     let held = object(4).retained_bytes();
-    let fills_the_bucket = MAX_OBJECT_BYTES_PER_BUCKET - held - overhead;
+    let fills_the_bucket = max_object_bytes_per_bucket() - held - overhead;
     assert_eq!(
         store.put_object("one", "large", object(fills_the_bucket)),
         Some(ObjectWrite::Created),

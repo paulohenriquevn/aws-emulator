@@ -157,7 +157,8 @@ pub const ARCHIVED_STORAGE_CLASSES: [&str; 2] = ["GLACIER", "DEEP_ARCHIVE"];
 /// before this check, and a key is allocated per stored object.
 pub const MAX_OBJECT_KEY_BYTES: usize = 1_024;
 
-/// How many objects one bucket in this emulator may hold.
+/// How many objects one bucket in this emulator may hold, unless the deployment sets
+/// [`MAX_OBJECTS_PER_BUCKET_ENV`] (see [`max_objects_per_bucket`]).
 ///
 /// NOT a fidelity claim: S3 publishes no such limit ("you can store any number of objects
 /// in a bucket"). It is the emulator's own ceiling, because every object it records lives
@@ -165,9 +166,11 @@ pub const MAX_OBJECT_KEY_BYTES: usize = 1_024;
 /// enforced so a caller looping on `PutObject` with fresh keys cannot grow the store
 /// without bound. A write past it is refused rather than recorded, the way a create past
 /// [`MAX_BUCKETS_PER_ACCOUNT`] is.
-pub const MAX_OBJECTS_PER_BUCKET: usize = 1_000;
+pub const DEFAULT_MAX_OBJECTS_PER_BUCKET: usize = 1_000;
 
-/// How many bytes of object payload one bucket in this emulator may hold in total.
+/// How many bytes of object payload one bucket in this emulator may hold in total, unless
+/// the deployment sets [`MAX_OBJECT_BYTES_PER_BUCKET_ENV`] (see
+/// [`max_object_bytes_per_bucket`]).
 ///
 /// NOT a fidelity claim, in either direction: AWS bounds what one bucket holds not at all,
 /// and the only size constraints it enforces are on a SINGLE payload — 5 GiB per
@@ -178,27 +181,98 @@ pub const MAX_OBJECTS_PER_BUCKET: usize = 1_000;
 /// the parts of an upload in flight beside the objects already stored. A write past it is
 /// refused rather than recorded — a refusal that is the emulator's own and says so, never a
 /// quota the API announces.
-pub const MAX_OBJECT_BYTES_PER_BUCKET: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_OBJECT_BYTES_PER_BUCKET: usize = 64 * 1024 * 1024;
 
-/// How many objects this emulator will hold ACROSS every bucket.
+/// How many objects this emulator will hold ACROSS every bucket, unless the deployment
+/// sets [`MAX_OBJECTS_TOTAL_ENV`] (see [`max_objects_total`]).
 ///
 /// The per-bucket ceilings alone would leave total memory bounded only by their product
 /// with [`MAX_BUCKETS_PER_ACCOUNT`], so the service-wide ones below are what actually
 /// bound this process: whatever a caller does — one bucket or ten thousand — the object
-/// store holds at most this many objects and [`MAX_OBJECT_BYTES_TOTAL`] bytes of payload.
-pub const MAX_OBJECTS_TOTAL: usize = 10_000;
+/// store holds at most this many objects and [`max_object_bytes_total`] bytes of payload.
+pub const DEFAULT_MAX_OBJECTS_TOTAL: usize = 10_000;
 
-/// How many bytes of object payload this emulator will hold across every bucket.
+/// How many bytes of object payload this emulator will hold across every bucket, unless
+/// the deployment sets [`MAX_OBJECT_BYTES_TOTAL_ENV`] (see [`max_object_bytes_total`]).
 ///
-/// Same reason as [`MAX_OBJECTS_TOTAL`], and the same order as the service-wide retained
-/// budgets of this workspace's peer services (appconfig's
+/// Same reason as [`DEFAULT_MAX_OBJECTS_TOTAL`], and the same order as the service-wide
+/// retained budgets of this workspace's peer services (appconfig's
 /// `MAX_TOTAL_HOSTED_CONFIGURATION_BYTES`, codeguruprofiler's `MAX_RETAINED_PROFILE_BYTES`).
 /// A write that would take the whole store past it is refused rather than recorded.
 ///
-/// Sized above [`MAX_OBJECT_BYTES_PER_BUCKET`] for the same reason that one is sized above
-/// the traffic AWS accepts: several buckets each holding the multipart uploads of an
+/// Sized above [`DEFAULT_MAX_OBJECT_BYTES_PER_BUCKET`] for the same reason that one is sized
+/// above the traffic AWS accepts: several buckets each holding the multipart uploads of an
 /// ordinary session is traffic S3 serves, so it is traffic this store records.
-pub const MAX_OBJECT_BYTES_TOTAL: usize = 128 * 1024 * 1024;
+pub const DEFAULT_MAX_OBJECT_BYTES_TOTAL: usize = 128 * 1024 * 1024;
+
+/// The environment variable that sets the per-bucket object ceiling, in objects.
+pub const MAX_OBJECTS_PER_BUCKET_ENV: &str = "EMULATOR_S3_MAX_OBJECTS_PER_BUCKET";
+
+/// The environment variable that sets the per-bucket byte budget, in bytes.
+pub const MAX_OBJECT_BYTES_PER_BUCKET_ENV: &str = "EMULATOR_S3_MAX_OBJECT_BYTES_PER_BUCKET";
+
+/// The environment variable that sets the object ceiling across every bucket, in objects.
+pub const MAX_OBJECTS_TOTAL_ENV: &str = "EMULATOR_S3_MAX_OBJECTS_TOTAL";
+
+/// The environment variable that sets the byte budget across every bucket, in bytes.
+pub const MAX_OBJECT_BYTES_TOTAL_ENV: &str = "EMULATOR_S3_MAX_OBJECT_BYTES_TOTAL";
+
+/// The per-bucket object ceiling every write path consults: [`MAX_OBJECTS_PER_BUCKET_ENV`],
+/// or [`DEFAULT_MAX_OBJECTS_PER_BUCKET`] when it is unset, unparseable or zero. These
+/// ceilings bound this process's memory rather than any S3 quota, so a long-running
+/// deployment (log chunks, build artefacts) raises them. Read once per process.
+pub fn max_objects_per_bucket() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        object_store_limit_from_env(MAX_OBJECTS_PER_BUCKET_ENV, DEFAULT_MAX_OBJECTS_PER_BUCKET)
+    })
+}
+
+/// The per-bucket byte budget every write path consults: [`MAX_OBJECT_BYTES_PER_BUCKET_ENV`],
+/// or [`DEFAULT_MAX_OBJECT_BYTES_PER_BUCKET`] when it is unset, unparseable or zero. Read
+/// once per process.
+pub fn max_object_bytes_per_bucket() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        object_store_limit_from_env(
+            MAX_OBJECT_BYTES_PER_BUCKET_ENV,
+            DEFAULT_MAX_OBJECT_BYTES_PER_BUCKET,
+        )
+    })
+}
+
+/// The object ceiling across every bucket: [`MAX_OBJECTS_TOTAL_ENV`], or
+/// [`DEFAULT_MAX_OBJECTS_TOTAL`] when it is unset, unparseable or zero. Read once per
+/// process.
+pub fn max_objects_total() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        object_store_limit_from_env(MAX_OBJECTS_TOTAL_ENV, DEFAULT_MAX_OBJECTS_TOTAL)
+    })
+}
+
+/// The byte budget across every bucket: [`MAX_OBJECT_BYTES_TOTAL_ENV`], or
+/// [`DEFAULT_MAX_OBJECT_BYTES_TOTAL`] when it is unset, unparseable or zero. Read once per
+/// process.
+pub fn max_object_bytes_total() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        object_store_limit_from_env(MAX_OBJECT_BYTES_TOTAL_ENV, DEFAULT_MAX_OBJECT_BYTES_TOTAL)
+    })
+}
+
+fn object_store_limit_from_env(variable: &str, default: usize) -> usize {
+    parse_object_store_limit(std::env::var(variable).ok().as_deref(), default)
+}
+
+/// Pure core of the object store ceilings: the parsed value, or `default` for an absent,
+/// unparseable or zero value, the same rule `EMULATOR_ECR_MAX_STORED_BYTES` follows.
+pub fn parse_object_store_limit(raw: Option<&str>, default: usize) -> usize {
+    match raw.map(|value| value.trim().parse::<usize>()) {
+        Some(Ok(limit)) if limit > 0 => limit,
+        _ => default,
+    }
+}
 
 /// How many sessions `CreateSession` keeps vended at once.
 ///
@@ -269,17 +343,17 @@ pub enum ObjectWrite {
     /// The request's user-defined metadata is larger than
     /// [`MAX_OBJECT_METADATA_BYTES`]; nothing was written.
     MetadataTooLarge { bytes: usize },
-    /// The bucket already holds [`MAX_OBJECTS_PER_BUCKET`] objects at other keys; nothing
+    /// The bucket already holds [`max_objects_per_bucket`] objects at other keys; nothing
     /// was written.
     ObjectCountReached,
-    /// Recording the object would take the bucket past [`MAX_OBJECT_BYTES_PER_BUCKET`]
+    /// Recording the object would take the bucket past [`max_object_bytes_per_bucket`]
     /// retained bytes; nothing was written.
     ByteBudgetReached { would_hold: usize },
-    /// This emulator already holds [`MAX_OBJECTS_TOTAL`] objects across every bucket;
+    /// This emulator already holds [`max_objects_total`] objects across every bucket;
     /// nothing was written.
     TotalObjectCountReached,
     /// Recording the object would take the whole store past
-    /// [`MAX_OBJECT_BYTES_TOTAL`] retained bytes; nothing was written.
+    /// [`max_object_bytes_total`] retained bytes; nothing was written.
     TotalByteBudgetReached { would_hold: usize },
 }
 
@@ -304,10 +378,10 @@ pub enum ObjectDeletion {
         version_id: Option<String>,
         displaced_object: bool,
     },
-    /// The bucket is at [`MAX_OBJECTS_PER_BUCKET`] stored versions, so the delete marker
+    /// The bucket is at [`max_objects_per_bucket`] stored versions, so the delete marker
     /// this delete would lay was refused rather than recorded; nothing was written.
     VersionCountReached,
-    /// This emulator is at [`MAX_OBJECTS_TOTAL`] stored versions across every bucket, so
+    /// This emulator is at [`max_objects_total`] stored versions across every bucket, so
     /// the delete marker was refused rather than recorded; nothing was written.
     TotalVersionCountReached,
 }
@@ -322,10 +396,10 @@ pub enum ObjectTagWrite {
     Applied,
     /// The bucket exists but holds no object at that key; nothing was written.
     NoSuchKey,
-    /// Keeping the tag set would take the bucket past [`MAX_OBJECT_BYTES_PER_BUCKET`]
+    /// Keeping the tag set would take the bucket past [`max_object_bytes_per_bucket`]
     /// retained bytes; nothing was written.
     ByteBudgetReached { would_hold: usize },
-    /// Keeping the tag set would take the whole store past [`MAX_OBJECT_BYTES_TOTAL`]
+    /// Keeping the tag set would take the whole store past [`max_object_bytes_total`]
     /// retained bytes; nothing was written.
     TotalByteBudgetReached { would_hold: usize },
 }
@@ -342,10 +416,10 @@ pub enum ObjectRetentionWrite {
     Applied,
     /// The bucket exists but holds no such object version; nothing was written.
     NoSuchObject,
-    /// Keeping the retention would take the bucket past [`MAX_OBJECT_BYTES_PER_BUCKET`]
+    /// Keeping the retention would take the bucket past [`max_object_bytes_per_bucket`]
     /// retained bytes; nothing was written.
     ByteBudgetReached { would_hold: usize },
-    /// Keeping the retention would take the whole store past [`MAX_OBJECT_BYTES_TOTAL`]
+    /// Keeping the retention would take the whole store past [`max_object_bytes_total`]
     /// retained bytes; nothing was written.
     TotalByteBudgetReached { would_hold: usize },
 }
@@ -364,10 +438,10 @@ pub enum ObjectEncryptionWrite {
     /// The bucket exists but holds no such object version; nothing was written.
     NoSuchObject,
     /// Keeping the configuration would take the bucket past
-    /// [`MAX_OBJECT_BYTES_PER_BUCKET`] retained bytes; nothing was written.
+    /// [`max_object_bytes_per_bucket`] retained bytes; nothing was written.
     ByteBudgetReached { would_hold: usize },
     /// Keeping the configuration would take the whole store past
-    /// [`MAX_OBJECT_BYTES_TOTAL`] retained bytes; nothing was written.
+    /// [`max_object_bytes_total`] retained bytes; nothing was written.
     TotalByteBudgetReached { would_hold: usize },
 }
 
@@ -399,10 +473,10 @@ pub enum ObjectAclWrite {
     Applied,
     /// The bucket exists but holds no such object version; nothing was written.
     NoSuchObject,
-    /// Keeping the ACL would take the bucket past [`MAX_OBJECT_BYTES_PER_BUCKET`] retained
+    /// Keeping the ACL would take the bucket past [`max_object_bytes_per_bucket`] retained
     /// bytes; nothing was written.
     ByteBudgetReached { would_hold: usize },
-    /// Keeping the ACL would take the whole store past [`MAX_OBJECT_BYTES_TOTAL`] retained
+    /// Keeping the ACL would take the whole store past [`max_object_bytes_total`] retained
     /// bytes; nothing was written.
     TotalByteBudgetReached { would_hold: usize },
 }
@@ -418,10 +492,10 @@ pub enum ObjectRestoreWrite {
     Applied,
     /// The bucket exists but holds no such object version; nothing was written.
     NoSuchObject,
-    /// Keeping the restore would take the bucket past [`MAX_OBJECT_BYTES_PER_BUCKET`]
+    /// Keeping the restore would take the bucket past [`max_object_bytes_per_bucket`]
     /// retained bytes; nothing was written.
     ByteBudgetReached { would_hold: usize },
-    /// Keeping the restore would take the whole store past [`MAX_OBJECT_BYTES_TOTAL`]
+    /// Keeping the restore would take the whole store past [`max_object_bytes_total`]
     /// retained bytes; nothing was written.
     TotalByteBudgetReached { would_hold: usize },
 }
@@ -441,10 +515,10 @@ pub enum AnnotationWrite {
     /// The object already carries [`MAX_ANNOTATIONS_PER_OBJECT`] annotations and this call
     /// names a new one; nothing was written.
     LimitReached,
-    /// Keeping the annotation would take the bucket past [`MAX_OBJECT_BYTES_PER_BUCKET`]
+    /// Keeping the annotation would take the bucket past [`max_object_bytes_per_bucket`]
     /// retained bytes; nothing was written.
     ByteBudgetReached { would_hold: usize },
-    /// Keeping the annotation would take the whole store past [`MAX_OBJECT_BYTES_TOTAL`]
+    /// Keeping the annotation would take the whole store past [`max_object_bytes_total`]
     /// retained bytes; nothing was written.
     TotalByteBudgetReached { would_hold: usize },
 }
@@ -569,7 +643,7 @@ pub fn annotation_name_rejection(name: &str) -> Option<AnnotationNameRejection> 
 /// NOT a fidelity claim: S3 publishes no limit on concurrent multipart uploads of a
 /// bucket, and the model bounds nothing either (`MultipartUploadId` is a plain string,
 /// `smithy_query(query="shape",shape="MultipartUploadId")`). It is the emulator's own
-/// ceiling, for the same reason as [`MAX_OBJECTS_PER_BUCKET`]: every upload this store
+/// ceiling, for the same reason as [`max_objects_per_bucket`]: every upload this store
 /// records lives in this process's memory, so a caller looping on
 /// `CreateMultipartUpload` must not grow it without bound. An initiation past it is
 /// refused rather than recorded.
@@ -577,7 +651,7 @@ pub const MAX_MULTIPART_UPLOADS_PER_BUCKET: usize = 1_000;
 
 /// How many in-progress multipart uploads this emulator keeps ACROSS every bucket.
 ///
-/// Same reason as [`MAX_OBJECTS_TOTAL`]: the per-bucket ceiling alone would leave the
+/// Same reason as [`max_objects_total`]: the per-bucket ceiling alone would leave the
 /// total bounded only by its product with [`MAX_BUCKETS_PER_ACCOUNT`], so this is what
 /// bounds the uploads this process holds whatever a caller does.
 pub const MAX_MULTIPART_UPLOADS_TOTAL: usize = 10_000;
@@ -639,10 +713,10 @@ pub enum PartUpload {
     /// written.
     NoSuchUpload,
     /// Recording the part would leave the bucket holding more than
-    /// [`MAX_OBJECT_BYTES_PER_BUCKET`] bytes; nothing was written.
+    /// [`max_object_bytes_per_bucket`] bytes; nothing was written.
     ByteBudgetReached { would_hold: usize },
     /// Recording the part would leave this emulator holding more than
-    /// [`MAX_OBJECT_BYTES_TOTAL`] bytes across every bucket; nothing was written.
+    /// [`max_object_bytes_total`] bytes across every bucket; nothing was written.
     TotalByteBudgetReached { would_hold: usize },
 }
 

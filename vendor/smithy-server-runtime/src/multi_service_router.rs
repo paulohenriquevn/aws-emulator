@@ -632,6 +632,10 @@ fn runtime_api_request_from_parts(parts: &http::request::Parts, body: Vec<u8>) -
                 .append(name.as_str().to_string(), v.to_string());
         }
     }
+    // fork: the slot a listener left for a body relayed as it arrives travels to the plane.
+    if let Some(slot) = parts.extensions.get::<emulator_server::ResponseBodySlot>() {
+        req.add_extension(slot.clone());
+    }
     req
 }
 

@@ -13,6 +13,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -54,11 +55,21 @@ func newEmulator(endpoint string, aliases []string, caBundle string, creds aws.C
 	}
 	return &emulator{
 		endpoint: parsed,
-		stsHosts: append([]string{parsed.Host}, aliases...),
+		stsHosts: append([]string{parsed.Host, podSTSHost(parsed)}, aliases...),
 		creds:    creds,
 		client:   &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}},
 		signer:   v4.NewSigner(),
 	}, nil
+}
+
+// podSTSHost is the host a pod's token is presigned for: the emulator's name, which its
+// AWS_ENDPOINT_URL_STS names, on the endpoint's port.
+func podSTSHost(endpoint *url.URL) string {
+	port := endpoint.Port()
+	if port == "" {
+		port = "443"
+	}
+	return net.JoinHostPort(emulatorHostname, port)
 }
 
 // controlPlane is what GET /_fork/eks/clusters/{name}/control-plane answers.

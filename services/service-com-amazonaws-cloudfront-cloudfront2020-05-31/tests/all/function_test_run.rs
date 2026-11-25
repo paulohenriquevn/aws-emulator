@@ -867,3 +867,40 @@ async fn one_run_cannot_report_more_than_the_ceilings_allow() {
          {message:?}"
     );
 }
+
+/// fork: a `cloudfront-js-2.0` function is tested with the `cloudfront` module it runs with
+/// at the edge, so its `cf.kvs()` handle reads the key value store the tested stage
+/// associates, live.
+#[tokio::test]
+async fn a_test_runs_the_cloudfront_module_over_the_associated_key_value_store() {
+    let (router, engine) = crate::edge_viewer_request_function::edge_emulator();
+    let store_arn = crate::function_lifecycle::create_key_value_store(&router, "tested-routes").await;
+    {
+        let state = ::service_com_amazonaws_cloudfrontkeyvaluestore_cloudfrontkeyvaluestore::state::service_state(&*engine)
+            .expect("the key value store state");
+        let mut held = state.lock();
+        let store = held
+            .store_mut(&store_arn, ::std::time::SystemTime::now())
+            .expect("the store");
+        store.keys.insert("route:example.com".to_string(), "cell-7".to_string());
+    }
+    let code = "import cf from 'cloudfront';\n\
+                async function handler(event) {\n\
+                  var request = event.request;\n\
+                  var cell = await cf.kvs().get('route:' + request.headers.host.value);\n\
+                  request.headers['x-cell'] = { value: cell };\n\
+                  return request;\n\
+                }\n";
+    let mut create = function("tested-with-module", code);
+    create.associations = vec![store_arn];
+    let created = create_function(&router, &create.xml()).await;
+    assert_eq!(created.status, 201, "CreateFunction: {}", created.raw);
+    let etag = created.header("etag").to_string();
+
+    let answer = test_function(&router, "tested-with-module", None, VIEWER_REQUEST_EVENT.as_bytes(), &etag).await;
+    assert_eq!(answer.status, 200, "TestFunction: {}", answer.raw);
+    let output = result_text(answer.root(), "FunctionOutput")
+        .unwrap_or_else(|| panic!("the result carries no FunctionOutput: {}", answer.raw));
+    let output = json(output, "the module test");
+    assert_eq!(output["request"]["headers"]["x-cell"]["value"], "cell-7", "{output}");
+}

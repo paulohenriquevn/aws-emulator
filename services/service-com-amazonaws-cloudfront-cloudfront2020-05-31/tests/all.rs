@@ -135,6 +135,8 @@ mod edge_request_metrics;
 mod edge_request_shaping;
 #[path = "all/edge_web_acl.rs"]
 mod edge_web_acl;
+#[path = "all/edge_viewer_request_function.rs"]
+mod edge_viewer_request_function;
 #[path = "all/enum_value_set_message.rs"]
 mod enum_value_set_message;
 #[path = "all/error_envelope.rs"]

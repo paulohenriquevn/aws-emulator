@@ -30,6 +30,10 @@ pub mod java_truststore;
 
 mod tls_certificate_authority;
 pub use tls_certificate_authority::TlsCertificateAuthority;
+// fork: a response body relayed as it arrives (a load balancer's target answer, an
+// origin's answer a CloudFront edge relays).
+mod relayed_body;
+pub use relayed_body::{RelayError, RelayedBody, RelayedResponseWanted, ResponseBodySlot};
 
 /// Resource-listener surfaces: the agent-facing `tcp()`/`http()` listeners a generated
 /// service opens for a resource (RDS Postgres port, API Gateway invoke URL),
@@ -49,7 +53,8 @@ pub use listeners::{
 /// Extract AWS Access Key ID from SigV4 Authorization header.
 ///
 /// Parses the `Credential=AKID/...` component from the standard
-/// `AWS4-HMAC-SHA256 Credential=...` header format.
+/// `AWS4-HMAC-SHA256 Credential=...` header format, and (fork) from SigV4A's
+/// `AWS4-ECDSA-P256-SHA256 Credential=...`.
 ///
 /// Returns `"default"` if the header is missing, unparseable, or empty.
 pub fn extract_akid(headers: &http::HeaderMap) -> String {
@@ -57,8 +62,12 @@ pub fn extract_akid(headers: &http::HeaderMap) -> String {
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|auth| {
-            auth.strip_prefix("AWS4-HMAC-SHA256 Credential=")
-                .or_else(|| auth.strip_prefix("AWS4-HMAC-SHA256  Credential="))
+            let fields = auth
+                .strip_prefix("AWS4-HMAC-SHA256 ")
+                .or_else(|| auth.strip_prefix("AWS4-ECDSA-P256-SHA256 "))?;
+            fields
+                .strip_prefix("Credential=")
+                .or_else(|| fields.strip_prefix(" Credential="))
         })
         .and_then(|cred| cred.split('/').next())
         .filter(|akid| !akid.is_empty())
@@ -151,6 +160,14 @@ pub fn aws_json_ok_response(
 /// long-lived tenant repos.
 pub const EMULATOR_ACCOUNT_ID: &str = "000000000000";
 
+/// fork: the name the pods of an EKS cluster reach the emulator by. The eks-provisioner
+/// maps it, and its [`EMULATOR_ACCOUNT_ID`]-prefixed form, to the gateway in every pod's
+/// `/etc/hosts` and points the pod's `AWS_ENDPOINT_URL` at it (`emulatorHostname` in
+/// `fork/eks-provisioner/endpoint.go`, which must stay equal to this). A name rather than
+/// the gateway's address, because an SDK prefixes the endpoint host with the account id for
+/// some services, which an address cannot carry. The TLS certificate names both forms.
+pub const EMULATOR_HOSTNAME: &str = "aws.emulator.internal";
+
 /// The canonical AWS account id ([`EMULATOR_ACCOUNT_ID`]) every generated emulator
 /// must present. Prefer this accessor over hardcoding the literal so the account
 /// contract has exactly one source of truth.
@@ -218,20 +235,39 @@ pub async fn http_connector_call<S: EmulatorService>(
         .await
         .map_err(ConnectorError::io)?
         .to_bytes();
-    let req = http::Request::from_parts(parts, body_bytes);
+    let mut req = http::Request::from_parts(parts, body_bytes);
+    // fork: a caller that asked for the body as it arrives gives the callee a slot to leave
+    // it in ([`RelayedResponseWanted`]).
+    let relayed = req
+        .extensions()
+        .get::<RelayedResponseWanted>()
+        .is_some()
+        .then(ResponseBodySlot::default);
+    if let Some(slot) = &relayed {
+        req.extensions_mut().insert(slot.clone());
+    }
 
     tokio::task::yield_now().await;
     let response = svc.handle_request(req).await;
     let (mut parts, body_bytes) = response.into_parts();
-    set_framing_content_length(&mut parts, body_bytes.len());
+    let body = match relayed.as_ref().and_then(ResponseBodySlot::take) {
+        Some(streamed) => {
+            // A length measured on the empty buffered body is not the relayed body's.
+            parts.headers.remove(http::header::CONTENT_LENGTH);
+            streamed.into_sdk_body()
+        }
+        None => {
+            set_framing_content_length(&mut parts, body_bytes.len());
+            aws_smithy_types::body::SdkBody::from(body_bytes)
+        }
+    };
 
     // The whole response goes to the SDK: status, every header, and the body. An SDK reads
     // most of what a call returns from the headers (an S3 `ETag`, `Content-Length` and
     // version id, for one), so a response rebuilt from the status and body alone reaches
     // the caller with those members absent. The conversion reports a failure as a connector
     // error rather than a panic, as the request side does for a request it cannot convert.
-    let response =
-        http::Response::from_parts(parts, aws_smithy_types::body::SdkBody::from(body_bytes));
+    let response = http::Response::from_parts(parts, body);
     aws_smithy_runtime_api::client::orchestrator::HttpResponse::try_from(response)
         .map_err(|e| ConnectorError::other(Box::new(e), None))
 }
@@ -1002,10 +1038,20 @@ async fn emulator_service_fallback<S: EmulatorService>(
                 .expect("a status-only response is always valid");
         }
     };
-    let emulator_req = http::Request::from_parts(parts, body_bytes);
+    let mut emulator_req = http::Request::from_parts(parts, body_bytes);
+    // fork: a plane that relays its body as it arrives leaves it here ([`ResponseBodySlot`]).
+    let relayed = ResponseBodySlot::default();
+    emulator_req.extensions_mut().insert(relayed.clone());
     let emulator_resp = service.handle_request(emulator_req).await;
-    let (resp_parts, resp_body) = emulator_resp.into_parts();
-    axum::response::Response::from_parts(resp_parts, axum::body::Body::from(resp_body))
+    let (mut resp_parts, resp_body) = emulator_resp.into_parts();
+    match relayed.take() {
+        Some(body) => {
+            // A length measured on the empty buffered body is not the relayed body's.
+            resp_parts.headers.remove(http::header::CONTENT_LENGTH);
+            axum::response::Response::from_parts(resp_parts, axum::body::Body::new(body))
+        }
+        None => axum::response::Response::from_parts(resp_parts, axum::body::Body::from(resp_body)),
+    }
 }
 
 /// Buffers a request body: declared past `limit` it is a `413` before any of it is read, past
@@ -1781,6 +1827,11 @@ fn service_from_host_authority(host: &str) -> Option<String> {
         .split(':')
         .next()
         .unwrap_or(host_no_userinfo);
+    // The emulator's own name, which pods resolve to it, addresses no service, the same
+    // as `localhost`; its account-prefixed form has a numeric first label already.
+    if host_no_port.eq_ignore_ascii_case(EMULATOR_HOSTNAME) {
+        return None;
+    }
     let label = host_no_port.split('.').next()?;
     let key = normalize_service_key(label);
     if key.is_empty() || key == "localhost" || key.bytes().all(|b| b.is_ascii_digit()) {
@@ -2209,6 +2260,93 @@ mod tests {
         check!(out.headers().get("content-length").is_none());
     }
 
+    /// fork: a body whose frames are the chunks sent on a channel, and that ends when the
+    /// sender is dropped.
+    struct ChannelBody(tokio::sync::mpsc::UnboundedReceiver<bytes::Bytes>);
+
+    impl hyper::body::Body for ChannelBody {
+        type Data = bytes::Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<hyper::body::Frame<bytes::Bytes>, Self::Error>>> {
+            self.0
+                .poll_recv(cx)
+                .map(|chunk| chunk.map(|bytes| Ok(hyper::body::Frame::data(bytes))))
+        }
+    }
+
+    /// fork: a plane that relays a body when the request carries a slot, as a load balancer
+    /// does, and answers `whole` buffered when it carries none.
+    #[derive(Clone)]
+    struct Relaying(Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<bytes::Bytes>>>>);
+
+    impl EmulatorService for Relaying {
+        async fn handle_request(
+            &self,
+            req: http::Request<bytes::Bytes>,
+        ) -> http::Response<bytes::Bytes> {
+            let chunks = self.0.lock().take();
+            match (req.extensions().get::<ResponseBodySlot>(), chunks) {
+                (Some(slot), Some(chunks)) => {
+                    slot.put(RelayedBody::new(ChannelBody(chunks)));
+                    with_status(200, b"")
+                }
+                _ => with_status(200, b"whole"),
+            }
+        }
+    }
+
+    fn relaying() -> (Relaying, tokio::sync::mpsc::UnboundedSender<bytes::Bytes>) {
+        let (sender, chunks) = tokio::sync::mpsc::unbounded_channel();
+        (Relaying(Arc::new(Mutex::new(Some(chunks)))), sender)
+    }
+
+    /// fork: a caller that asks for the body as it arrives gets the plane's relayed body, a
+    /// chunk at a time, before the plane has finished it, and with no `Content-Length`.
+    #[tokio::test]
+    async fn the_connector_hands_a_caller_that_asks_for_it_the_body_as_it_arrives() {
+        let (service, sender) = relaying();
+        let mut request = sdk_request();
+        request.add_extension(RelayedResponseWanted);
+
+        let out = http_connector_call(&service, request).await.unwrap();
+
+        check!(out.status().as_u16() == 200);
+        check!(out.headers().get("content-length").is_none());
+        // The body is a stream, not a buffer.
+        check!(out.body().bytes().is_none());
+        let mut body = out.into_body();
+        sender.send(bytes::Bytes::from_static(b"data: 1\n\n")).unwrap();
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("the first chunk arrives while the plane is still sending")
+        .expect("a frame")
+        .expect("a readable body");
+        check!(first.into_data().ok() == Some(bytes::Bytes::from_static(b"data: 1\n\n")));
+        sender.send(bytes::Bytes::from_static(b"data: 2\n\n")).unwrap();
+        drop(sender);
+        let rest = http_body_util::BodyExt::collect(body).await.unwrap().to_bytes();
+        check!(rest == bytes::Bytes::from_static(b"data: 2\n\n"));
+    }
+
+    /// fork: a caller that does not ask gives the plane no slot, so the plane answers whole
+    /// and the caller reads the whole body from the buffer, as before.
+    #[tokio::test]
+    async fn the_connector_answers_a_caller_that_does_not_ask_with_the_whole_body() {
+        let (service, _sender) = relaying();
+
+        let out = http_connector_call(&service, sdk_request()).await.unwrap();
+
+        check!(out.body().bytes() == Some(&b"whole"[..]));
+        check!(out.headers().get("content-length") == Some("5"));
+    }
+
 
     #[test]
     fn rustls_trusts_the_server_certificate_as_its_own_ca() {
@@ -2263,6 +2401,19 @@ mod tests {
         headers.insert(
             "authorization",
             "AWS4-HMAC-SHA256  Credential=TESTKEY/20240101/us-east-1/kms/aws4_request, SignedHeaders=host, Signature=abc"
+                .parse()
+                .unwrap(),
+        );
+        check!(extract_akid(&headers) == "TESTKEY");
+    }
+
+    /// fork: SigV4A's scope has no region field, and its key is the caller's as in SigV4.
+    #[test]
+    fn extract_akid_sigv4a() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "AWS4-ECDSA-P256-SHA256 Credential=TESTKEY/20240101/cloudfront-keyvaluestore/aws4_request, SignedHeaders=host;x-amz-region-set, Signature=3045"
                 .parse()
                 .unwrap(),
         );
@@ -3173,6 +3324,23 @@ mod tests {
         check!(service_from_host(&local).is_none());
         let ip = headers_with(&[("host", "127.0.0.1:8443")]);
         check!(service_from_host(&ip).is_none());
+    }
+
+    /// Pods reach the emulator as `aws.emulator.internal`, the way a client on the host
+    /// reaches it as `localhost`: the emulator's own name addresses no service, so an
+    /// unsigned STS `AssumeRoleWithWebIdentity` sent to it is still left for STS to claim.
+    #[test]
+    fn service_from_host_ignores_the_emulators_own_name() {
+        for host in [
+            format!("{EMULATOR_HOSTNAME}:9597"),
+            EMULATOR_HOSTNAME.to_uppercase(),
+            format!("{EMULATOR_ACCOUNT_ID}.{EMULATOR_HOSTNAME}:9597"),
+        ] {
+            let headers = headers_with(&[("host", &host)]);
+            check!(service_from_host(&headers).is_none(), "host {host}");
+        }
+        let parts = parts_with(&[("host", "aws.emulator.internal:9597")]);
+        check!(resolve_route_key(&parts).is_none());
     }
 
     #[test]

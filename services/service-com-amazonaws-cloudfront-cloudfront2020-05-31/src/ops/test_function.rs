@@ -217,13 +217,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The summary this result reports is the projection of the stage that was
             // tested — "Contains configuration information and metadata about the CloudFront
             // function that was tested" — read from the record, never from the request.
+            // fork: a `cloudfront-js-2.0` function is tested with the `cloudfront` module it
+            // runs with at the edge, over the key value store the tested stage associates.
+            // "The Test API ... don't test whether an origin modification has occurred", so
+            // what `updateRequestOrigin` recorded is not reported.
+            let module = crate::state::cloudfront_module_for(&*self.engine, &store, &tested.config);
             (
                 stage.to_string(),
                 tested.code.clone(),
                 tested.to_summary(&function.name, &function.arn),
+                module,
             )
         };
-        let (stage, code, function_summary) = prepared;
+        let (stage, code, function_summary, module) = prepared;
 
         // "You provide an event object that represents an HTTP request or response that your
         // CloudFront distribution could receive in production", and the function is handed
@@ -247,7 +253,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The run itself: the code the store holds, over that event object, under every bound
         // the runtime module declares, on a blocking thread.
-        let run = crate::state::run_function(code, event).await;
+        let run = crate::state::run_function(code, event, module).await;
         let compute_utilization = run.compute_utilization();
 
         // One record per invocation: which function and stage ran and what the run came to.

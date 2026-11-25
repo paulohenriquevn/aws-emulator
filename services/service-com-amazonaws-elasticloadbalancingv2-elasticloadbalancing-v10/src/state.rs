@@ -640,7 +640,30 @@ impl LoadBalancerRecord {
             .as_deref()
             == Some("true")
     }
+
+    /// fork: how long a connection to a client or a target may stay inactive, with no data
+    /// sent or received, before the load balancer closes it: the value its attribute
+    /// collection carries `idle_timeout.timeout_seconds` at, else the catalog's default.
+    ///
+    /// The attribute is written only as an integer of 1 to 4000, so a value that does not
+    /// read as seconds is one this store never held; it is answered as the documented
+    /// default, 60 seconds.
+    pub fn idle_timeout(&self) -> Duration {
+        self.attributes
+            .get(IDLE_TIMEOUT_ATTRIBUTE)
+            .cloned()
+            .or_else(|| load_balancer_attribute(IDLE_TIMEOUT_ATTRIBUTE).and_then(|spec| spec.default_for(self)))
+            .and_then(|seconds| seconds.parse::<u64>().ok())
+            .map_or(DEFAULT_IDLE_TIMEOUT, Duration::from_secs)
+    }
 }
+
+/// fork: the load balancer attribute naming the connection idle timeout, in seconds.
+pub const IDLE_TIMEOUT_ATTRIBUTE: &str = "idle_timeout.timeout_seconds";
+
+/// fork: "By default, Elastic Load Balancing sets the idle timeout value for your load
+/// balancer to 60 seconds."
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The health-check settings of a target group, with every default materialized at
 /// create time so a later read reports the same values AWS would.
@@ -1856,7 +1879,7 @@ pub static LOAD_BALANCER_ATTRIBUTES: &[LoadBalancerAttributeSpec] = &[
     // "idle_timeout.timeout_seconds - The idle timeout value, in seconds. The valid
     // range is 1-4000 seconds. The default is 60 seconds."
     LoadBalancerAttributeSpec {
-        key: "idle_timeout.timeout_seconds",
+        key: IDLE_TIMEOUT_ATTRIBUTE,
         domain: AttributeDomain::Integer { min: 1, max: 4000 },
         families: APPLICATION_ONLY,
         default: |_| Some("60".to_string()),

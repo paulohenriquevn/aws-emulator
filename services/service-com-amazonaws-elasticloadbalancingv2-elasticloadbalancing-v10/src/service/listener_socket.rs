@@ -71,7 +71,8 @@ use std::time::Duration;
 
 use ::bytes::Bytes;
 use ::emulator_server::{listener_caps, ListenerConn, NativeHandler, TlsUpgrader};
-use ::http_body_util::{BodyExt as _, Full, Limited};
+use ::emulator_server::{RelayedBody, ResponseBodySlot};
+use ::http_body_util::{BodyExt as _, Limited};
 use ::service_common::acm_certificate_key_material::{
     CertificateKeyMaterial, CertificateKeyMaterialDirectory,
 };
@@ -585,7 +586,7 @@ async fn answer(
     load_balancer_name: String,
     listener_port: Option<i32>,
     request: ::http::Request<::hyper::body::Incoming>,
-) -> ::http::Response<Full<Bytes>> {
+) -> ::http::Response<RelayedBody> {
     let (parts, body) = request.into_parts();
     // One permit per request IN FLIGHT, taken BEFORE a byte of the body is read: what the
     // bodies being read hold at once is then the in-flight cap times the ceiling below,
@@ -600,7 +601,7 @@ async fn answer(
         let Ok(collected) = limited.collect().await else {
             return generated(PAYLOAD_TOO_LARGE, BODY_TOO_LARGE);
         };
-        let Some(forwarded) = forwarded(
+        let Some(mut forwarded) = forwarded(
             parts,
             collected.to_bytes(),
             &load_balancer_name,
@@ -608,23 +609,34 @@ async fn answer(
         ) else {
             return generated(BAD_REQUEST, MALFORMED_REQUEST_TARGET);
         };
+        // fork: the plane leaves a target's body here to be written as it arrives.
+        let relayed = ResponseBodySlot::default();
+        forwarded.add_extension(relayed.clone());
         match callback.http_connector().call(forwarded).await {
             Ok(response) => {
                 let status = response.status().as_u16();
                 let mut answer = ::http::Response::builder().status(status);
+                let relayed_body = relayed.take();
                 for (name, value) in response.headers().iter() {
+                    // A length measured on the empty buffered body is not the relayed body's.
+                    if relayed_body.is_some() && name.eq_ignore_ascii_case("content-length") {
+                        continue;
+                    }
                     answer = answer.header(name, value);
                 }
-                let body = Bytes::from(
-                    response
-                        .into_body()
-                        .bytes()
-                        .map(<[u8]>::to_vec)
-                        .unwrap_or_default(),
-                );
+                let body = match relayed_body {
+                    Some(body) => body,
+                    None => RelayedBody::from(Bytes::from(
+                        response
+                            .into_body()
+                            .bytes()
+                            .map(<[u8]>::to_vec)
+                            .unwrap_or_default(),
+                    )),
+                };
                 answer
-                    .body(Full::new(body.clone()))
-                    .unwrap_or_else(|_| ::http::Response::new(Full::new(body)))
+                    .body(body)
+                    .unwrap_or_else(|_| generated(BAD_GATEWAY, NO_LOAD_BALANCER))
             }
             // The data plane is this same process, so this is no answer about a load
             // balancer; it is reported the way the plane reports an answer it could not
@@ -755,16 +767,16 @@ const REQUEST_TIMED_OUT: &str = "This request took longer than this address allo
 
 /// One answer of this address's own, for a request the data plane never saw. Plain text, as
 /// a load balancer's own generated answers are.
-fn generated(status: u16, message: &str) -> ::http::Response<Full<Bytes>> {
+fn generated(status: u16, message: &str) -> ::http::Response<RelayedBody> {
     let body = Bytes::from(message.to_string());
     ::http::Response::builder()
         .status(status)
         .header("content-type", "text/plain; charset=utf-8")
-        .body(Full::new(body.clone()))
+        .body(RelayedBody::from(body.clone()))
         // Every argument is this function's own, so the builder cannot fail; answer a bare
         // status rather than panicking if it ever does.
         .unwrap_or_else(|_| {
-            let mut response = ::http::Response::new(Full::new(body));
+            let mut response = ::http::Response::new(RelayedBody::from(body));
             *response.status_mut() = ::http::StatusCode::BAD_GATEWAY;
             response
         })

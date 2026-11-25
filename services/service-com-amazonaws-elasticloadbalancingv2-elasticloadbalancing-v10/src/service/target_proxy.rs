@@ -23,13 +23,29 @@
 //!
 //! What it answers when the target does not: [`TARGET_UNREACHABLE_STATUS`] (502) when the
 //! address cannot be resolved, the connection is refused, or the answer is not HTTP, and
-//! [`TARGET_TIMEOUT_STATUS`] (504) when the target does not answer within the load
-//! balancer's default idle timeout. A TLS handshake the target fails is a 502.
+//! [`TARGET_TIMEOUT_STATUS`] (504) when the target sends nothing for the load balancer's
+//! idle timeout. A TLS handshake the target fails is a 502.
+//!
+//! The idle timeout is the load balancer's `idle_timeout.timeout_seconds`, and it counts
+//! INACTIVITY: "the period of time an existing client or target connection can remain
+//! inactive, with no data being sent or received, before the load balancer closes the
+//! connection" (Elastic Load Balancing User Guide, "Edit attributes for your Application
+//! Load Balancer"). A target that keeps sending, a Server-Sent Events stream for one, is
+//! relayed for as long as it lasts. On a request whose listener writes the answer as it
+//! arrives (an [`emulator_server::ResponseBodySlot`] travels with it), the target's body is
+//! relayed frame by frame; a target that goes idle after its head was relayed has its
+//! connection closed, the 504 being no longer the load balancer's to send. A request made in
+//! process gets the body whole, and one that goes idle before its end is a 504.
 
+use std::future::Future as _;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use emulator_server::{RelayError, RelayedBody, ResponseBodySlot};
 use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::{Body, Frame, SizeHint};
 use hyper_util::rt::TokioIo;
 
 use super::data_plane::{DataPlaneRequest, Served, TARGET_UNREACHABLE_STATUS};
@@ -42,12 +58,9 @@ pub const TARGET_TIMEOUT_STATUS: u16 = 504;
 /// How long the connection to a target may take to open.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the target may take to answer: the load balancer attribute
-/// `idle_timeout.timeout_seconds` defaults to 60 seconds.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// The largest answer body this emulator relays, a bound of this module (an Application
-/// Load Balancer states none). A larger answer is a 502.
+/// The largest answer body this emulator holds whole for a request made in process, a bound
+/// of this module (an Application Load Balancer states none). A larger answer is a 502. A
+/// body relayed as it arrives is not held, so it has no such bound.
 pub const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// The headers that describe one connection rather than the message, which a proxy does not
@@ -85,6 +98,9 @@ pub(super) struct Proxied {
     /// connection to the target comes from.
     pub(super) source_group_ids: Vec<String>,
     pub(super) source_interface_ids: Vec<String>,
+    /// The serving load balancer's `idle_timeout.timeout_seconds`: how long the target may
+    /// send nothing.
+    pub(super) idle_timeout: Duration,
     /// The target-group stickiness cookie the answer hands back, for a client that does not
     /// hold it yet, as a `lambda` target's answer does.
     pub(super) set_cookie: Option<String>,
@@ -112,6 +128,7 @@ pub(super) async fn served<Eng: Send + Sync + 'static>(
     proxied: &Proxied,
     request: &DataPlaneRequest,
     body: &[u8],
+    relayed: Option<&ResponseBodySlot>,
 ) -> Served {
     let Some(transport) = proxied.target_protocol.as_deref().and_then(Transport::of) else {
         tracing::warn!(
@@ -150,7 +167,7 @@ pub(super) async fn served<Eng: Send + Sync + 'static>(
         );
         return Served::status(TARGET_UNREACHABLE_STATUS);
     }
-    match exchange(&address, transport, proxied, request, body).await {
+    match exchange(&address, transport, proxied, request, body, relayed).await {
         Ok(mut served) => {
             if let Some(field) = proxied.set_cookie.clone() {
                 served.headers.push(("set-cookie".to_string(), field));
@@ -158,7 +175,13 @@ pub(super) async fn served<Eng: Send + Sync + 'static>(
             served
         }
         Err(Failure::TimedOut) => {
-            tracing::warn!(target_group = %proxied.target_group_arn, %address, port = proxied.port, "the target did not answer in time");
+            tracing::warn!(
+                target_group = %proxied.target_group_arn,
+                %address,
+                port = proxied.port,
+                idle_timeout = ?proxied.idle_timeout,
+                "the target sent nothing for the load balancer's idle timeout"
+            );
             Served::status(TARGET_TIMEOUT_STATUS)
         }
         Err(Failure::Unreachable(reason)) => {
@@ -298,14 +321,18 @@ async fn exchange(
     proxied: &Proxied,
     request: &DataPlaneRequest,
     body: &[u8],
+    relayed: Option<&ResponseBodySlot>,
 ) -> Result<Served, Failure> {
     let stream = connect(address, proxied.port, transport).await?;
     let outgoing = outgoing_request(proxied, request, body)?;
-    let answer = tokio::time::timeout(RESPONSE_TIMEOUT, async move {
+    let idle = proxied.idle_timeout;
+    // The head is the target's first data, so waiting for it is bounded by the idle timeout.
+    let (parts, incoming) = tokio::time::timeout(idle, async move {
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .map_err(|error| Failure::Unreachable(format!("handshake: {error}")))?;
-        let driver = tokio::spawn(async move {
+        // The connection is driven until the answer's body has been read or dropped.
+        tokio::spawn(async move {
             if let Err(error) = connection.await {
                 tracing::debug!(%error, "the connection to the target ended with an error");
             }
@@ -314,24 +341,104 @@ async fn exchange(
             .send_request(outgoing)
             .await
             .map_err(|error| Failure::Unreachable(format!("request: {error}")))?;
-        let (parts, incoming) = response.into_parts();
-        let collected = Limited::new(incoming, MAX_RESPONSE_BODY_BYTES)
-            .collect()
-            .await
-            .map_err(|error| Failure::Unreachable(format!("response body: {error}")))?
-            .to_bytes();
-        driver.abort();
-        Ok::<_, Failure>((parts, collected))
+        Ok::<_, Failure>(response.into_parts())
     })
     .await
     .map_err(|_| Failure::TimedOut)??;
-    let (parts, collected) = answer;
-    Ok(Served {
+    let body = IdleTimeoutBody::new(incoming, idle, proxied.target_group_arn.clone());
+    let served = Served {
         status: parts.status.as_u16(),
         headers: relayed_headers(&parts.headers),
-        body: collected.to_vec(),
         ..Served::default()
+    };
+    if let Some(slot) = relayed {
+        slot.put(RelayedBody::new(body));
+        return Ok(served);
+    }
+    let collected = Limited::new(body, MAX_RESPONSE_BODY_BYTES)
+        .collect()
+        .await
+        .map_err(|error| {
+            if error.downcast_ref::<TargetWentIdle>().is_some() {
+                Failure::TimedOut
+            } else {
+                Failure::Unreachable(format!("response body: {error}"))
+            }
+        })?
+        .to_bytes();
+    Ok(Served {
+        body: collected.to_vec(),
+        ..served
     })
+}
+
+/// fork: why a target's body ended early: it sent nothing for the idle timeout.
+#[derive(Debug)]
+struct TargetWentIdle(Duration);
+
+impl std::fmt::Display for TargetWentIdle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the target sent nothing for the load balancer's idle timeout of {:?}", self.0)
+    }
+}
+
+impl std::error::Error for TargetWentIdle {}
+
+/// fork: a target's answer body that ends with [`TargetWentIdle`] when no frame arrives for
+/// `idle`; each frame that does arrive starts the period again.
+struct IdleTimeoutBody {
+    inner: hyper::body::Incoming,
+    idle: Duration,
+    deadline: Pin<Box<tokio::time::Sleep>>,
+    /// The target group the body comes from, for the log line a cut stream leaves.
+    target_group_arn: String,
+}
+
+impl IdleTimeoutBody {
+    fn new(inner: hyper::body::Incoming, idle: Duration, target_group_arn: String) -> Self {
+        Self {
+            inner,
+            idle,
+            deadline: Box::pin(tokio::time::sleep(idle)),
+            target_group_arn,
+        }
+    }
+}
+
+impl Body for IdleTimeoutBody {
+    type Data = Bytes;
+    type Error = RelayError;
+
+    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, RelayError>>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(frame) => {
+                let next = tokio::time::Instant::now() + this.idle;
+                this.deadline.as_mut().reset(next);
+                Poll::Ready(frame.map(|result| result.map_err(RelayError::from)))
+            }
+            Poll::Pending => match this.deadline.as_mut().poll(cx) {
+                Poll::Ready(()) => {
+                    tracing::warn!(
+                        target_group = %this.target_group_arn,
+                        idle_timeout = ?this.idle,
+                        "the target's answer went idle for the load balancer's idle timeout, \
+                         so its connection is closed"
+                    );
+                    Poll::Ready(Some(Err(Box::new(TargetWentIdle(this.idle)))))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 /// The request the target receives: the client's method, path, query, headers and body,
@@ -411,6 +518,7 @@ mod tests {
             guarding_group_ids: Vec::new(),
             source_group_ids: Vec::new(),
             source_interface_ids: Vec::new(),
+            idle_timeout: crate::state::DEFAULT_IDLE_TIMEOUT,
             set_cookie: None,
         }
     }

@@ -526,7 +526,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                      bytes, past the {} bytes this emulator keeps per bucket",
                     input.part_number,
                     input.bucket,
-                    crate::state::MAX_OBJECT_BYTES_PER_BUCKET
+                    crate::state::max_object_bytes_per_bucket()
                 )));
             }
             crate::state::PartUpload::TotalByteBudgetReached { would_hold } => {
@@ -534,7 +534,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     "recording part {} would leave this emulator holding {would_hold} \
                      bytes across every bucket, past the {} bytes it keeps in total",
                     input.part_number,
-                    crate::state::MAX_OBJECT_BYTES_TOTAL
+                    crate::state::max_object_bytes_total()
                 )));
             }
         }
