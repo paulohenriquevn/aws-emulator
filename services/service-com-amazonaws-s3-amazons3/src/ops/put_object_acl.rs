@@ -429,7 +429,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObjectAcl<Eng>
                      per bucket",
                     input.key,
                     input.bucket,
-                    crate::state::MAX_OBJECT_BYTES_PER_BUCKET
+                    crate::state::max_object_bytes_per_bucket()
                 )));
             }
             Some(crate::state::ObjectAclWrite::TotalByteBudgetReached { would_hold }) => {
@@ -438,7 +438,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObjectAcl<Eng>
                      bytes of objects across every bucket, past the {} bytes it keeps in \
                      total",
                     input.key,
-                    crate::state::MAX_OBJECT_BYTES_TOTAL
+                    crate::state::max_object_bytes_total()
                 )));
             }
         }

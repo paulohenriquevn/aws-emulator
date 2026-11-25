@@ -192,7 +192,7 @@ pub const MAX_PACKAGE_VERSIONS_PER_PACKAGE: usize = 1_000;
 /// product, which is astronomically larger than the host's memory. This is the bound that
 /// actually holds the process: real CodeArtifact keeps assets in S3, this emulator keeps
 /// them in RAM, so the bytes it retains need a ceiling of their own. Peer services that
-/// retain caller bytes declare the same thing (S3's `MAX_OBJECT_BYTES_TOTAL`,
+/// retain caller bytes declare the same thing (S3's `DEFAULT_MAX_OBJECT_BYTES_TOTAL`,
 /// mediastoredata's `MAX_STORED_BYTES`); this sits in the same band and is far above
 /// anything a fixture publishes. A publish that would cross it is refused with
 /// `ServiceQuotaExceededException` (402) BEFORE the asset is stored.

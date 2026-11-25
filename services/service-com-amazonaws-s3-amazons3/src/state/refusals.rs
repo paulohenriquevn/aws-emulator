@@ -919,19 +919,23 @@ pub const MAX_REPLICATION_RULES: usize = 1_000;
 ///
 /// This emulator's own ceilings, not AWS quotas: a stored configuration may name up to
 /// [`MAX_REPLICATION_RULES`] destinations and an object may be as large as
-/// [`MAX_OBJECT_BYTES_PER_BUCKET`], and the work ONE write would do is the PRODUCT of the
+/// [`max_object_bytes_per_bucket`], and the work ONE write would do is the PRODUCT of the
 /// two — both of them a caller's to choose. So the fan-out one call performs is bounded
 /// here, in the place that performs it ([`ComAmazonawsS3Amazons3State::replicate_write`]),
 /// rather than by each factor separately: at most this many copies, carrying at most
-/// [`MAX_REPLICATION_BYTES_PER_WRITE`] bytes between them. Past either, the copies are not
+/// [`max_replication_bytes_per_write`] bytes between them. Past either, the copies are not
 /// made and the source version reports [`REPLICATION_STATUS_FAILED`], which is what
 /// "replication did not happen" says — nothing claims a copy that was not written.
 pub const MAX_REPLICATION_DESTINATIONS_PER_WRITE: usize = 10;
 
 /// See [`MAX_REPLICATION_DESTINATIONS_PER_WRITE`] — the bytes half of the same bound, so a
 /// write of a large object fans out to fewer destinations rather than copying the product of
-/// the two ceilings.
-pub const MAX_REPLICATION_BYTES_PER_WRITE: usize = 4 * MAX_OBJECT_BYTES_PER_BUCKET;
+/// the two ceilings. It follows the per-bucket byte budget, so a deployment that raises
+/// that budget ([`MAX_OBJECT_BYTES_PER_BUCKET_ENV`]) can still replicate the larger objects
+/// it now stores.
+pub fn max_replication_bytes_per_write() -> usize {
+    4 * max_object_bytes_per_bucket()
+}
 
 /// How many S3 Intelligent-Tiering configurations one bucket may carry.
 ///

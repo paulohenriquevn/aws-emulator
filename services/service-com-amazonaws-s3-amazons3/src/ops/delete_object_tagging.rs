@@ -333,7 +333,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjectTaggi
                      of objects, past the {} bytes this emulator keeps per bucket",
                     input.key,
                     input.bucket,
-                    crate::state::MAX_OBJECT_BYTES_PER_BUCKET
+                    crate::state::max_object_bytes_per_bucket()
                 )));
             }
             Some(crate::state::ObjectTagWrite::TotalByteBudgetReached { would_hold }) => {
@@ -341,7 +341,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjectTaggi
                     "untagging {:?} would leave this emulator holding {would_hold} bytes of \
                      objects across every bucket, past the {} bytes it keeps in total",
                     input.key,
-                    crate::state::MAX_OBJECT_BYTES_TOTAL
+                    crate::state::max_object_bytes_total()
                 )));
             }
         }

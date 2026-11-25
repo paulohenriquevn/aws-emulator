@@ -940,7 +940,7 @@ fn refused_write(
                 "the bucket {:?} already holds the maximum of {} objects this emulator \
                  keeps per bucket; delete an object before completing the upload of {:?}",
                 input.bucket,
-                crate::state::MAX_OBJECTS_PER_BUCKET,
+                crate::state::max_objects_per_bucket(),
                 input.key
             ))
         }
@@ -950,14 +950,14 @@ fn refused_write(
                  objects, past the {} bytes this emulator keeps per bucket",
                 input.key,
                 input.bucket,
-                crate::state::MAX_OBJECT_BYTES_PER_BUCKET
+                crate::state::max_object_bytes_per_bucket()
             ))
         }
         crate::state::ObjectWrite::TotalObjectCountReached => {
             crate::scaffolded::Scaffolded::validation(format!(
                 "this emulator already holds the maximum of {} objects across every \
                  bucket; delete an object before completing the upload of {:?}",
-                crate::state::MAX_OBJECTS_TOTAL,
+                crate::state::max_objects_total(),
                 input.key
             ))
         }
@@ -966,7 +966,7 @@ fn refused_write(
                 "assembling {:?} would leave this emulator holding {would_hold} bytes of \
                  objects across every bucket, past the {} bytes it keeps in total",
                 input.key,
-                crate::state::MAX_OBJECT_BYTES_TOTAL
+                crate::state::max_object_bytes_total()
             ))
         }
     }

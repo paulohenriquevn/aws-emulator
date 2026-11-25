@@ -172,6 +172,14 @@ jobs:
           cargo test -p service-com-amazonaws-ecr-amazonec2containerregistry-v20150921 --test all registry_v2
           cargo test -p aws-emulator-fork-router --test request_body_limit
 
+      - name: The S3 object store ceilings come from the environment
+        # The whole S3 suite: every write path reads the ceilings through the functions the
+        # environment sets, and the suites that fill a bucket to its ceiling prove the
+        # defaults still refuse.
+        run: |
+          cargo test -p service-com-amazonaws-s3-amazons3 --lib
+          cargo test -p service-com-amazonaws-s3-amazons3 --test all
+
       - name: RDS for PostgreSQL on real PostgreSQL containers
         run: cargo test -p service-com-amazonaws-rds-amazonrdsv19 --test all postgres_container -- --ignored --test-threads=1
 

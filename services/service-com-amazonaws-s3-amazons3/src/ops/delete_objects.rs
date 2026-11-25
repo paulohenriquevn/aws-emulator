@@ -604,7 +604,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
                                  marker for {key:?} cannot be recorded; delete a version \
                                  first",
                                 input.bucket,
-                                crate::state::MAX_OBJECTS_PER_BUCKET
+                                crate::state::max_objects_per_bucket()
                             )),
                         });
                     }
@@ -617,7 +617,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
                                 "this emulator already holds the maximum of {} object \
                                  versions across every bucket, so the delete marker for \
                                  {key:?} cannot be recorded; delete a version first",
-                                crate::state::MAX_OBJECTS_TOTAL
+                                crate::state::max_objects_total()
                             )),
                         });
                     }

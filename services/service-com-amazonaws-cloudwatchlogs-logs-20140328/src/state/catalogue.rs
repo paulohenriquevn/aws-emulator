@@ -801,7 +801,7 @@ pub const MAX_LOOKUP_TABLES: usize = 1_000;
 /// whatever a caller does — one table or a thousand — the lookup-table store holds at most
 /// this many bytes of caller-chosen content. Not a fidelity claim, and the same order as
 /// the service-wide retained budgets of this workspace's peer services (s3's
-/// `MAX_OBJECT_BYTES_TOTAL`, appconfig's `MAX_TOTAL_HOSTED_CONFIGURATION_BYTES`,
+/// `DEFAULT_MAX_OBJECT_BYTES_TOTAL`, appconfig's `MAX_TOTAL_HOSTED_CONFIGURATION_BYTES`,
 /// codeguruprofiler's `MAX_RETAINED_PROFILE_BYTES`). A create that would take the store past
 /// it is refused with the `LimitExceededException` `CreateLookupTable` models, BEFORE the
 /// body is retained, rather than recorded.

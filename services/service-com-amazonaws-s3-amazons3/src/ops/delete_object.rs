@@ -685,7 +685,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObject<Eng>
                      emulator keeps per bucket, so the delete marker for {:?} cannot be \
                      recorded; delete a version first",
                     input.bucket,
-                    crate::state::MAX_OBJECTS_PER_BUCKET,
+                    crate::state::max_objects_per_bucket(),
                     input.key
                 )))
             }
@@ -694,7 +694,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObject<Eng>
                     "this emulator already holds the maximum of {} object versions across \
                      every bucket, so the delete marker for {:?} cannot be recorded; delete \
                      a version first",
-                    crate::state::MAX_OBJECTS_TOTAL, input.key
+                    crate::state::max_objects_total(), input.key
                 )))
             }
         }
