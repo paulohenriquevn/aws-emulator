@@ -42,7 +42,13 @@ EMULATOR_NETWORK=aws-emulator-e2e
 EMULATOR_CIDR=172.30.0.0/16
 GATEWAY=172.30.0.1
 VPC_CIDR=10.42.0.0/16
-AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.37.8
+# The IRSA probe's image comes from ECR Public, pinned by digest in fork/ci/images.env. The
+# pod runs it under its ECR Public name; AWS_CLI_PULL says where the host pulls it from, which
+# in CI is a copy on GHCR, because ECR Public throttles GitHub's runners.
+# shellcheck source=fork/ci/images.env
+. "$(cd "$(dirname "$0")" && pwd)/../ci/images.env"
+AWS_CLI_IMAGE=${AWS_CLI_PIN%@*}
+AWS_CLI_PULL=${AWS_CLI_PULL:-$AWS_CLI_PIN}
 # crane copies the probe image into the emulator's ECR, and is that image too: it comes from
 # GCR, which does not throttle GitHub's runners as ECR Public does, and its largest layer is
 # under the emulator's default 16 MiB request body cap.
@@ -140,6 +146,26 @@ IRSA_ROLE=$(aws iam create-role --role-name "$CLUSTER-irsa" --query Role.Arn --o
   jq -cn --arg provider "$PROVIDER" --arg federated "arn:aws:iam::$ACCOUNT:oidc-provider/$PROVIDER" \
     '{Version:"2012-10-17",Statement:[{Effect:"Allow",Principal:{Federated:$federated},Action:"sts:AssumeRoleWithWebIdentity",
       Condition:{StringEquals:{($provider+":sub"):"system:serviceaccount:irsa:irsa-probe",($provider+":aud"):"sts.amazonaws.com"}}}]}')")
+# The probe's image is pulled once by the host, by digest, and loaded into every node, so no
+# node asks ECR Public for it. Docker pulls by repository@digest, without the tag, and the
+# image is then tagged with the name the pod uses.
+probe_pull=${AWS_CLI_PULL%@*}
+probe_pull=${probe_pull%:*}@${AWS_CLI_PULL##*@}
+for attempt in 1 2 3 4 5; do
+  docker pull -q "$probe_pull" >>"$LOG" 2>&1 && break
+  [[ $attempt == 5 ]] && fail "pulling $probe_pull; see $LOG"
+  say "pulling $probe_pull failed (attempt $attempt), retrying"
+  sleep $((attempt * 15))
+done
+docker tag "$probe_pull" "$AWS_CLI_IMAGE" >>"$LOG" 2>&1 || fail "tagging $probe_pull as $AWS_CLI_IMAGE; see $LOG"
+# Imported with the node's own platform only: the host's Docker holds only its own platform
+# of a multi-platform image.
+node_platform=linux/$(docker version -f '{{.Server.Arch}}')
+for node in $(kind get nodes --name "eks-$REGION-$CLUSTER"); do
+  docker save "$AWS_CLI_IMAGE" | docker exec -i "$node" ctr --namespace=k8s.io images import --platform "$node_platform" \
+    --digests --snapshotter=overlayfs - >>"$LOG" 2>&1 || fail "loading $AWS_CLI_IMAGE into the node $node; see $LOG"
+done
+say "the probe image is loaded into the nodes"
 kubectl create namespace irsa >>"$LOG"
 kubectl -n irsa create serviceaccount irsa-probe >>"$LOG"
 kubectl -n irsa annotate serviceaccount irsa-probe "eks.amazonaws.com/role-arn=$IRSA_ROLE" >>"$LOG"
