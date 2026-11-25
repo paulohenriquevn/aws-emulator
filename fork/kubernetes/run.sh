@@ -78,10 +78,18 @@ ESO_CHART_VERSION=2.15.0
 OPENCOST_CHART_VERSION=2.5.34
 POD_IDENTITY_AGENT_COMMIT=ff8532e7579cc6691d6319e818f13bdfefeeb83c
 WEBHOOK_IMAGE=amazon/amazon-eks-pod-identity-webhook:latest
-AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.37.8
 FILE_SERVER_IMAGE=nginx:1.29.3-alpine
 PSQL_IMAGE=postgres:16.11-alpine
-LBC_IMAGE=public.ecr.aws/eks/aws-load-balancer-controller:v$LBC_CHART_VERSION
+# The two images that come from ECR Public, pinned by digest in fork/ci/images.env. The
+# cluster runs each under its ECR Public name; AWS_CLI_PULL and LBC_PULL say where the host
+# pulls it from, which in CI is a copy on GHCR, because ECR Public throttles GitHub's runners.
+# shellcheck source=fork/ci/images.env
+. "$HERE/../ci/images.env"
+AWS_CLI_IMAGE=${AWS_CLI_PIN%@*}
+AWS_CLI_PULL=${AWS_CLI_PULL:-$AWS_CLI_PIN}
+LBC_IMAGE=${LBC_PIN%@*}
+LBC_PULL=${LBC_PULL:-$LBC_PIN}
+[[ $LBC_IMAGE == *":v$LBC_CHART_VERSION" ]] || { echo "fork/ci/images.env pins $LBC_IMAGE, not the chart's v$LBC_CHART_VERSION" >&2; exit 2; }
 DATABASE_PASSWORD=probe-Secret-42
 
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE
@@ -327,14 +335,25 @@ kind load docker-image eks-pod-identity-agent:fork --name "$KIND_CLUSTER" >>"$LO
 # The images the probes and the controllers run, pulled once by the host (with retries, as a
 # registry answers 429 Too Many Requests to a burst) and loaded into every node, instead of
 # pulled by each node on its own.
+#
+# preload_image <image the cluster runs> [<registry/repository:tag@digest to pull it by>]
 preload_image() {
-  local image=$1 attempt
+  local image=$1 pull=${2:-$1} attempt
+  if [[ $pull == *@* ]]; then
+    # Docker pulls by repository@digest, without the tag, and the image then has no name the
+    # cluster knows: it is tagged with the one the pods and the chart use.
+    local repository=${pull%@*}
+    pull=${repository%:*}@${pull##*@}
+  fi
   for attempt in 1 2 3 4 5; do
-    docker pull -q "$image" >>"$LOG" 2>&1 && break
-    [[ $attempt == 5 ]] && fail "pulling $image; see $LOG"
-    say "pulling $image failed (attempt $attempt), retrying"
+    docker pull -q "$pull" >>"$LOG" 2>&1 && break
+    [[ $attempt == 5 ]] && fail "pulling $pull; see $LOG"
+    say "pulling $pull failed (attempt $attempt), retrying"
     sleep $((attempt * 15))
   done
+  if [[ $pull != "$image" ]]; then
+    docker tag "$pull" "$image" >>"$LOG" 2>&1 || fail "tagging $pull as $image; see $LOG"
+  fi
   # Imported with the node's own platform only: `kind load docker-image` asks containerd for
   # every platform of a multi-platform image, and the host's Docker holds only its own.
   local node platform
@@ -344,7 +363,9 @@ preload_image() {
       --digests --snapshotter=overlayfs - >>"$LOG" 2>&1 || fail "loading $image into the kind node $node; see $LOG"
   done
 }
-for image in "$AWS_CLI_IMAGE" "$LBC_IMAGE" "$PSQL_IMAGE" "$FILE_SERVER_IMAGE"; do preload_image "$image"; done
+preload_image "$AWS_CLI_IMAGE" "$AWS_CLI_PULL"
+preload_image "$LBC_IMAGE" "$LBC_PULL"
+for image in "$PSQL_IMAGE" "$FILE_SERVER_IMAGE"; do preload_image "$image"; done
 say "images loaded into the kind nodes"
 helm upgrade --install eks-pod-identity-agent "$WORK/eks-pod-identity-agent/charts/eks-pod-identity-agent" -n kube-system \
   --set clusterName="$CLUSTER" --set image.override=eks-pod-identity-agent:fork --set image.pullPolicy=Never \

@@ -62,6 +62,7 @@ jobs:
         run: |
           fork/ci/find-tested-run_test.sh
           fork/ci/tested-tree_test.sh
+          fork/ci/mirror-image_test.sh
 
       - name: Look up a run that tested this tree
         id: lookup
@@ -443,6 +444,10 @@ jobs:
     if: ${{ !cancelled() && !needs.tested-tree.outputs.run-id && (needs.emulator.result == 'success' || inputs.emulator-run-id) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read # the emulator binary the emulator job, or an earlier run, built
+      packages: write # the copies of the ECR Public images below
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -458,6 +463,31 @@ jobs:
           kubectl version --client
           helm version
           aws --version
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          # For crane alone, which the next step installs: nothing here is worth a cache.
+          go-version-file: fork/eks-provisioner/go.mod
+          cache: false
+
+      - name: Copy the ECR Public images to GHCR
+        # ECR Public answers the shared addresses of GitHub's runners with "Data limit
+        # exceeded", so the cluster's AWS CLI and load balancer controller images come from
+        # copies on GHCR, under the digests fork/ci/images.env pins. Each copy is made once,
+        # by the first run that ECR Public lets through. The login is also what the pulls
+        # in fork/kubernetes/run.sh authenticate with.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          COPIES: ghcr.io/${{ github.repository_owner }}
+        run: |
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.2
+          crane auth login ghcr.io -u "$ACTOR" -p "$GH_TOKEN"
+          . fork/ci/images.env
+          aws_cli=$(fork/ci/mirror-image.sh "$AWS_CLI_PIN" "$COPIES/aws-cli")
+          lbc=$(fork/ci/mirror-image.sh "$LBC_PIN" "$COPIES/aws-load-balancer-controller")
+          echo "AWS_CLI_PULL=$aws_cli" >>"$GITHUB_ENV"
+          echo "LBC_PULL=$lbc" >>"$GITHUB_ENV"
 
       - name: Fetch the emulator binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -501,7 +531,7 @@ jobs:
     permissions:
       contents: read
       actions: read # the emulator binary the emulator job, or an earlier run, built
-      packages: write # the copy of the pod identity webhook image below
+      packages: write # the copies of the ECR Public images below
     env:
       # ECR Public answers the shared addresses of GitHub's runners with 429 "Data limit
       # exceeded", so the clusters here run a copy of the webhook image on GHCR: the same
@@ -520,26 +550,22 @@ jobs:
           go-version-file: fork/eks-provisioner/go.mod
           cache-dependency-path: fork/eks-provisioner/go.sum
 
-      - name: Copy the pod identity webhook image to GHCR
+      - name: Copy the ECR Public images to GHCR
+        # The pod identity webhook image the clusters run and the AWS CLI image of the IRSA
+        # probe (fork/ci/images.env). The login is also what the pull in
+        # fork/eks-provisioner/e2e.sh authenticates with.
         env:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
+          COPIES: ghcr.io/${{ github.repository_owner }}
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@v0.20.2
           crane auth login ghcr.io -u "$ACTOR" -p "$GH_TOKEN"
-          digest=${WEBHOOK_SOURCE#*@}
-          tag=${WEBHOOK_SOURCE#*:}; tag=${tag%@*}
-          if crane digest "$WEBHOOK_COPY@$digest" >/dev/null 2>&1; then
-            echo "$WEBHOOK_COPY@$digest is already there"
-          else
-            for attempt in 1 2 3 4 5 6; do
-              crane copy "$WEBHOOK_SOURCE" "$WEBHOOK_COPY:$tag" && break
-              [ "$attempt" = 6 ] && { echo "::error::ECR Public refused every copy of $WEBHOOK_SOURCE"; exit 1; }
-              sleep $((attempt * 30))
-            done
-          fi
-          test "$(crane digest "$WEBHOOK_COPY:$tag")" = "$digest"
-          echo "POD_IDENTITY_WEBHOOK_IMAGE=$WEBHOOK_COPY:$tag@$digest" >>"$GITHUB_ENV"
+          . fork/ci/images.env
+          webhook=$(fork/ci/mirror-image.sh "$WEBHOOK_SOURCE" "$WEBHOOK_COPY")
+          aws_cli=$(fork/ci/mirror-image.sh "$AWS_CLI_PIN" "$COPIES/aws-cli")
+          echo "POD_IDENTITY_WEBHOOK_IMAGE=$webhook" >>"$GITHUB_ENV"
+          echo "AWS_CLI_PULL=$aws_cli" >>"$GITHUB_ENV"
 
       - name: Unit tests
         working-directory: fork/eks-provisioner
