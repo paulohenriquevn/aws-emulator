@@ -63,6 +63,14 @@
 //! nothing, which is the `502` above; the enforcement in steps 1–4, which is CloudFront's
 //! own and needs no origin, is served in full.
 //!
+//! fork: an answer the edge neither caches nor compresses is RELAYED to a viewer whose
+//! listener writes the answer as it arrives (the request carries an
+//! [`::emulator_server::ResponseBodySlot`]): the origin is asked for its body as it arrives
+//! ([`::emulator_server::RelayedResponseWanted`]), the viewer gets the status and headers when
+//! the origin sends them, and the body follows a piece at a time, so a Server-Sent Events
+//! stream reaches the viewer event by event. Every other answer is held whole first, as the
+//! cache and the compression need it whole.
+//!
 //! Two things the fetch will not do. A REQUEST LOOP is refused instead of followed: an
 //! origin whose host the edge itself serves, and a request that has already been through
 //! an edge (its `Via` names CloudFront), are answered with the same `502` rather than
@@ -126,7 +134,14 @@ use aws_smithy_runtime_api::client::http::HttpConnector;
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse, StatusCode};
 use aws_smithy_types::body::SdkBody;
 use smithy_server_runtime::{http, OperationContext};
+use std::future::Future as _;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
+
+use ::bytes::Bytes;
+use ::emulator_server::{RelayError, RelayedBody, RelayedResponseWanted, ResponseBodySlot};
+use ::hyper::body::{Body, Frame, SizeHint};
 
 use super::edge_metrics;
 use super::origin_access::{self, OriginAccess};
@@ -906,6 +921,10 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     }
     let method = req.method().to_ascii_uppercase();
     let request_bytes = req.body().bytes().map_or(0, <[u8]>::len);
+    // fork: a listener that writes the answer as it arrives left a slot for the body on the
+    // viewer's own request; the request a viewer-request function returns is rebuilt without
+    // it, so it is read here.
+    let viewer_slot = req.extension::<ResponseBodySlot>().cloned();
     // The WAF web ACL the distribution's configuration puts in front of it decides the
     // request before anything the plan would do: "CloudFront responds to requests either
     // with the requested content or with an HTTP 403 status code (Forbidden)", so a request
@@ -941,7 +960,12 @@ pub async fn serve<Eng: Send + Sync + 'static>(
                 }
                 other => (other, None),
             };
-            execute(engine, ctx, plan, &cf_id, forwarded.as_ref().unwrap_or(req), received).await
+            let viewer = Viewer {
+                req: forwarded.as_ref().unwrap_or(req),
+                slot: viewer_slot.as_ref(),
+                received,
+            };
+            execute(engine, ctx, plan, &cf_id, &viewer).await
         }
     };
     // What the edge DID with this request is reported as the distribution's own CloudWatch
@@ -957,6 +981,7 @@ pub async fn serve<Eng: Send + Sync + 'static>(
             &edge_metrics::ServedRequest {
                 method: &method,
                 status: response.status().as_u16(),
+                // A relayed answer's body is not held, so it counts no bytes here.
                 response_bytes: response.body().bytes().map_or(0, <[u8]>::len),
                 request_bytes,
                 served_from,
@@ -968,15 +993,24 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     response
 }
 
-/// Carry out what the plan says, for `req` (the viewer's request, or the one its
-/// viewer-request function returned).
+/// The viewer request a plan is carried out for.
+struct Viewer<'r> {
+    /// The viewer's request, or the one its viewer-request function returned.
+    req: &'r RtRequest,
+    /// fork: where the listener that received the viewer's request takes a body relayed as it
+    /// arrives, or `None` for a request made in process.
+    slot: Option<&'r ResponseBodySlot>,
+    /// When the edge received the request, which origin latency is measured from.
+    received: Instant,
+}
+
+/// Carry out what the plan says, for `viewer`.
 async fn execute<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &OperationContext<'_>,
     plan: Plan,
     cf_id: &str,
-    req: &RtRequest,
-    received: Instant,
+    viewer: &Viewer<'_>,
 ) -> (RtResponse, edge_metrics::ServedFrom, Option<Duration>) {
     match plan {
         Plan::Generated { status, detail } => (
@@ -991,7 +1025,7 @@ async fn execute<Eng: Send + Sync + 'static>(
             None,
         ),
         Plan::Fetch(fetch) => {
-            let fetched = fetch_origin(engine, ctx, *fetch, cf_id, req, received).await;
+            let fetched = fetch_origin(engine, ctx, *fetch, cf_id, viewer).await;
             // An origin that answered is what the answer came FROM; one that answered
             // nothing leaves CloudFront to produce the answer itself, which is no
             // origin's and has no origin latency.
@@ -1824,9 +1858,9 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
     ctx: &OperationContext<'_>,
     fetch: OriginFetch,
     cf_id: &str,
-    req: &RtRequest,
-    received: Instant,
+    viewer: &Viewer<'_>,
 ) -> Fetched {
+    let req = viewer.req;
     let body = req.body().bytes().map(<[u8]>::to_vec).unwrap_or_default();
     let mut builder = ::http::Request::builder()
         .method(req.method())
@@ -1886,7 +1920,7 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
         SdkBody::from(::bytes::Bytes::from(body)),
     ))
     .map_err(|error| error.to_string());
-    let request = match built {
+    let mut request = match built {
         Ok(request) => request,
         Err(error) => {
             ::tracing::warn!(
@@ -1898,6 +1932,22 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
             return Fetched::of_cloudfront(generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id));
         }
     };
+    // fork: an answer the edge will not cache or compress needs no holding, so a viewer whose
+    // listener writes the answer as it arrives is relayed it; the origin is asked for its body
+    // the same way. A cache or a compression needs the whole body, so any other answer is
+    // fetched whole.
+    let relay_to = viewer
+        .slot
+        .filter(|_| fetch.cache.is_none() && fetch.encode.is_none());
+    if relay_to.is_some() {
+        request.add_extension(RelayedResponseWanted);
+    }
+    // `OriginReadTimeout` is "how long (in seconds) CloudFront waits for a response after
+    // forwarding a request to the origin" and "how long (in seconds) CloudFront waits after
+    // receiving a packet of a response from the origin and before receiving the next packet"
+    // (CloudFront Developer Guide, "Origin settings", "Response timeout"). The wait below is
+    // the first; a relayed body is bounded by the second ([`OriginReadTimeoutBody`]). An answer
+    // fetched whole is bounded by it as a whole, as before.
     let transport = ctx.callback().http_connector();
     let answered = ::tokio::time::timeout(fetch.read_timeout, transport.call(request)).await;
     let response = match answered {
@@ -1921,7 +1971,7 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
     };
     // The origin has answered, so this is the span from the edge receiving the viewer request
     // to the answer being ready: what the origin latency of this request is.
-    let origin_latency = received.elapsed();
+    let origin_latency = viewer.received.elapsed();
     let status = response.status().as_u16();
     // What the ORIGIN said about its own bytes: the media type, which decides whether the
     // edge may compress them, and the coding they are already under, which means it must
@@ -1934,11 +1984,30 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
         .headers()
         .get(CONTENT_ENCODING)
         .map(ToString::to_string);
-    let body = response
-        .into_body()
-        .bytes()
-        .map(<[u8]>::to_vec)
-        .unwrap_or_default();
+    let body = response.into_body();
+    // fork: an origin that relays its body (an emulated load balancer) answered with the
+    // status and headers alone; the body goes to the viewer's listener as it arrives. An
+    // origin that answered whole (an S3 bucket, the transport's own refusal) is served whole
+    // below, as before.
+    if let Some(slot) = relay_to.filter(|_| body.bytes().is_none()) {
+        slot.put(RelayedBody::new(OriginReadTimeoutBody::new(
+            body,
+            fetch.read_timeout,
+            fetch.uri.clone(),
+        )));
+        let head = OriginAnswer {
+            status,
+            body: Vec::new(),
+            content_type,
+            content_encoding,
+        };
+        return Fetched {
+            // No coding: an answer the edge compresses is never relayed.
+            response: served_origin_answer(&head, None, origin_x_cache(status), cf_id),
+            origin_latency: Some(origin_latency),
+        };
+    }
+    let body = body.bytes().map(<[u8]>::to_vec).unwrap_or_default();
     if is_transport_refusal(&body) {
         ::tracing::warn!(
             uri = %fetch.uri,
@@ -1964,17 +2033,110 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
             );
         }
     }
-    // The origin answered, so the answer is the origin's — a MISS, since this request is
-    // what went to the origin. An origin answer that is itself an error is reported as
-    // one CloudFront did not produce from its cache either.
-    let x_cache = if is_cacheable_status(status) || status < 400 {
+    Fetched {
+        response: served_origin_answer(&answer, fetch.encode, origin_x_cache(status), cf_id),
+        origin_latency: Some(origin_latency),
+    }
+}
+
+/// The `X-Cache` of an answer the origin produced for this request.
+///
+/// The origin answered, so the answer is the origin's: a MISS, since this request is what
+/// went to the origin. An origin answer that is itself an error is reported as one
+/// CloudFront did not produce from its cache either.
+fn origin_x_cache(status: u16) -> &'static str {
+    if is_cacheable_status(status) || status < 400 {
         CACHE_MISS
     } else {
         CACHE_ERROR
-    };
-    Fetched {
-        response: served_origin_answer(&answer, fetch.encode, x_cache, cf_id),
-        origin_latency: Some(origin_latency),
+    }
+}
+
+/// fork: why a relayed origin body ended early: the origin sent nothing for its read timeout
+/// after its answer had started.
+#[derive(Debug)]
+struct OriginWentIdle {
+    uri: String,
+    read_timeout: Duration,
+}
+
+impl std::fmt::Display for OriginWentIdle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the origin {} sent nothing for its origin read timeout of {:?}",
+            self.uri, self.read_timeout
+        )
+    }
+}
+
+impl std::error::Error for OriginWentIdle {}
+
+/// fork: an origin's body relayed to a viewer, ended with [`OriginWentIdle`] when no frame
+/// arrives for `read_timeout`; each frame that does arrive starts the period again.
+///
+/// The head is already with the viewer by then, so the 502 can no longer be answered: the
+/// error ends the body and the viewer's connection is closed.
+struct OriginReadTimeoutBody {
+    inner: SdkBody,
+    read_timeout: Duration,
+    deadline: Pin<Box<::tokio::time::Sleep>>,
+    /// The origin request's URI, for the log line a cut stream leaves.
+    uri: String,
+}
+
+impl OriginReadTimeoutBody {
+    fn new(inner: SdkBody, read_timeout: Duration, uri: String) -> Self {
+        Self {
+            inner,
+            read_timeout,
+            deadline: Box::pin(::tokio::time::sleep(read_timeout)),
+            uri,
+        }
+    }
+}
+
+impl Body for OriginReadTimeoutBody {
+    type Data = Bytes;
+    type Error = RelayError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, RelayError>>> {
+        let this = self.get_mut();
+        match Body::poll_frame(Pin::new(&mut this.inner), cx) {
+            Poll::Ready(frame) => {
+                let next = ::tokio::time::Instant::now() + this.read_timeout;
+                this.deadline.as_mut().reset(next);
+                Poll::Ready(frame)
+            }
+            Poll::Pending => match this.deadline.as_mut().poll(cx) {
+                Poll::Ready(()) => {
+                    let idle = OriginWentIdle {
+                        uri: this.uri.clone(),
+                        read_timeout: this.read_timeout,
+                    };
+                    ::tracing::warn!(
+                        uri = %idle.uri,
+                        timeout_seconds = idle.read_timeout.as_secs(),
+                        "the origin's answer went idle for its read timeout, so the viewer's \
+                         connection is closed"
+                    );
+                    Poll::Ready(Some(Err(Box::new(idle))))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    // Named through the trait: `SdkBody` has inherent methods of these names of its own.
+    fn is_end_stream(&self) -> bool {
+        Body::is_end_stream(&self.inner)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        Body::size_hint(&self.inner)
     }
 }
 

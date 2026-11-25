@@ -19,6 +19,9 @@
 //! ([`::service_common::in_band_tls`], so this service never touches a key or a
 //! certificate).
 //!
+//! fork: an answer the data plane relays as it arrives (an origin's body it neither caches nor
+//! compresses) is written here the same way, a piece at a time, rather than held whole.
+//!
 //! The listener is the ADDRESS, not the data plane: everything a viewer request is answered
 //! BY — resolving the distribution, the geographic restriction, the cache behaviour, the
 //! cache and the origin fetch — stays in [`crate::service::edge`], which serves the same
@@ -42,8 +45,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use ::bytes::Bytes;
-use ::emulator_server::{listener_caps, BrowserVerdict, ListenerConn, RemoteOrigins, TlsUpgrader};
-use ::http_body_util::{BodyExt as _, Full, Limited};
+use ::emulator_server::{
+    listener_caps, BrowserVerdict, ListenerConn, RelayedBody, RelayedResponseWanted, RemoteOrigins,
+    TlsUpgrader,
+};
+use ::http_body_util::{BodyExt as _, Limited};
 use ::smithy_server_runtime::EmbeddedEmulator;
 use ::tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use aws_smithy_runtime_api::client::http::HttpConnector;
@@ -187,7 +193,8 @@ impl ::emulator_server::NativeHandler for EdgeFrontDoor {
 /// The encryption is negotiated in band first ([`::service_common::in_band_tls`]), so one
 /// address serves the `http://` and the `https://` a viewer may dial. HTTP/1.1 only, as
 /// the emulator's own front door offers: every request is fully buffered, so nothing
-/// relies on HTTP/2 streaming. The header-read deadline and the body ceiling are the
+/// relies on HTTP/2 streaming; an answer the data plane relays is written as it arrives.
+/// The header-read deadline and the body ceiling are the
 /// core's, so a viewer that dribbles a request line or sends more than one connection may
 /// carry cannot hold the connection permit the core issued for it.
 async fn serve_connection(
@@ -258,7 +265,7 @@ async fn answer(
     callback: EmbeddedEmulator,
     request: ::http::Request<::hyper::body::Incoming>,
     encrypted: bool,
-) -> ::http::Response<Full<Bytes>> {
+) -> ::http::Response<RelayedBody> {
     let Some(distribution) = distribution.get().cloned() else {
         // The create that opened this listener has not named its distribution yet, so there
         // is nothing here to serve: reported as the edge reports a request it can resolve
@@ -282,10 +289,12 @@ async fn answer(
         let Ok(collected) = limited.collect().await else {
             return generated(PAYLOAD_TOO_LARGE, BODY_TOO_LARGE);
         };
-        let Some(forwarded) = forwarded(parts, collected.to_bytes(), &distribution, encrypted)
+        let Some(mut forwarded) = forwarded(parts, collected.to_bytes(), &distribution, encrypted)
         else {
             return generated(BAD_GATEWAY, NO_DISTRIBUTION);
         };
+        // fork: this listener writes the answer as it arrives, so the data plane may relay it.
+        forwarded.add_extension(RelayedResponseWanted);
         match callback.http_connector().call(forwarded).await {
             Ok(response) => {
                 let status = response.status().as_u16();
@@ -293,16 +302,14 @@ async fn answer(
                 for (name, value) in response.headers().iter() {
                     answer = answer.header(name, value);
                 }
-                let body = Bytes::from(
-                    response
-                        .into_body()
-                        .bytes()
-                        .map(<[u8]>::to_vec)
-                        .unwrap_or_default(),
-                );
-                answer
-                    .body(Full::new(body.clone()))
-                    .unwrap_or_else(|_| ::http::Response::new(Full::new(body)))
+                let body = response.into_body();
+                // A body the data plane answered whole is written whole; one it relays is
+                // written as it arrives (the answer then carries no `Content-Length`).
+                let body = match body.bytes().map(Bytes::copy_from_slice) {
+                    Some(whole) => RelayedBody::from(whole),
+                    None => RelayedBody::new(body),
+                };
+                answer.body(body).unwrap_or_else(|_| generated(BAD_GATEWAY, NO_DISTRIBUTION))
             }
             // The data plane is this same process, so this is no answer about a
             // distribution; it is reported as the edge reports an answer it could not
@@ -389,7 +396,7 @@ fn within_the_distribution(path: &str) -> Option<&str> {
 /// and the browser check. `None` lets the request through to the data plane.
 fn refused_before_the_edge(
     parts: &::http::request::Parts,
-) -> Option<::http::Response<Full<Bytes>>> {
+) -> Option<::http::Response<RelayedBody>> {
     let header = |name: &str| parts.headers.get(name).and_then(|value| value.to_str().ok());
 
     // HTTP/1.1 requires a `Host`, and without an authority the rebinding guard cannot be
@@ -488,16 +495,16 @@ const NO_WEBSOCKETS: &str = "This address does not serve WebSocket connections.\
 
 /// One answer of this address's own, for a viewer request the data plane never saw. Plain
 /// text, as the edge's own generated answers are.
-fn generated(status: u16, message: &str) -> ::http::Response<Full<Bytes>> {
+fn generated(status: u16, message: &str) -> ::http::Response<RelayedBody> {
     let body = Bytes::from(message.to_string());
     ::http::Response::builder()
         .status(status)
         .header("content-type", "text/plain; charset=utf-8")
-        .body(Full::new(body.clone()))
+        .body(RelayedBody::from(body.clone()))
         // Every argument is this function's own, so the builder cannot fail; answer a bare
         // status rather than panicking if it ever does.
         .unwrap_or_else(|_| {
-            let mut response = ::http::Response::new(Full::new(body));
+            let mut response = ::http::Response::new(RelayedBody::from(body));
             *response.status_mut() = ::http::StatusCode::BAD_GATEWAY;
             response
         })

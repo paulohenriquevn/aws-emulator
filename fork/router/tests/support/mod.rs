@@ -12,8 +12,11 @@ use bytes::Bytes;
 use emulator_server::{EmulatorService, SigV4Authenticator};
 use service_com_amazonaws_ec2_amazonec2::state as ec2;
 use service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State as ElbState;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /// The emulator endpoint the requests are addressed to.
 pub const HOST: &str = "127.0.0.1:9297";
@@ -313,4 +316,112 @@ pub async fn cell_load_balancer(router: &Router, engine: &InMemoryEngine, port: 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("the cell's target did not become healthy; its state is {state_reported}");
+}
+
+/// What an [`event_stream_target`] does once it has read a request for `/events`.
+#[derive(Clone, Copy)]
+pub enum EventStream {
+    /// Sends the head and `events` events, `interval_seconds` apart, then ends the body.
+    Events { events: u32, interval_seconds: u64 },
+    /// Sends the head and one event, then nothing, holding the connection open.
+    StallsAfterOneEvent,
+    /// Sends nothing, holding the connection open.
+    Silent,
+}
+
+/// The body of the `events` events an [`EventStream::Events`] target sends, in order.
+pub fn events_body(events: u32) -> String {
+    (1..=events).map(|number| format!("data: {number}\n\n")).collect()
+}
+
+/// An HTTP target on a loopback port that answers `/events` with a Server-Sent Events stream
+/// behaving as `behaviour` says, and any other path, the health check's included, with an
+/// empty 200; answers its port.
+pub async fn event_stream_target(behaviour: EventStream) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
+    let port = listener.local_addr().expect("a bound address").port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut received = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => received.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                if !received.starts_with(b"GET /events ") {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    let _ = stream.shutdown().await;
+                    return;
+                }
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                            cache-control: no-cache\r\ntransfer-encoding: chunked\r\n\r\n";
+                let event = |number: u32| {
+                    let data = format!("data: {number}\n\n");
+                    format!("{:x}\r\n{data}\r\n", data.len())
+                };
+                match behaviour {
+                    EventStream::Events { events, interval_seconds } => {
+                        let _ = stream.write_all(head.as_bytes()).await;
+                        for number in 1..=events {
+                            let _ = stream.write_all(event(number).as_bytes()).await;
+                            let _ = stream.flush().await;
+                            if number < events {
+                                tokio::time::sleep(Duration::from_secs(interval_seconds)).await;
+                            }
+                        }
+                        let _ = stream.write_all(b"0\r\n\r\n").await;
+                        let _ = stream.shutdown().await;
+                    }
+                    EventStream::StallsAfterOneEvent => {
+                        let _ = stream.write_all(head.as_bytes()).await;
+                        let _ = stream.write_all(event(1).as_bytes()).await;
+                        let _ = stream.flush().await;
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                    EventStream::Silent => tokio::time::sleep(Duration::from_secs(30)).await,
+                }
+            });
+        }
+    });
+    port
+}
+
+/// A loopback port nothing listens on.
+pub fn free_port() -> u16 {
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a loopback port");
+    probe.local_addr().expect("a bound address").port()
+}
+
+/// Serve `router` on a data port of its own, as the binary does, and wait until it answers;
+/// answers a client that trusts the emulator's certificate and the port's address.
+pub async fn on_data_port(router: Router) -> (reqwest::Client, SocketAddr) {
+    // The served data port writes its client files under the home directory; a test's go to
+    // the target directory rather than the developer's.
+    std::env::set_var("HOME", env!("CARGO_TARGET_TMPDIR"));
+    let data_port = free_port();
+    tokio::spawn(emulator_server::serve_emulator_on(router, Ipv4Addr::LOCALHOST.into(), data_port));
+    let root = emulator_server::TlsCertificateAuthority::for_this_process().der().to_vec();
+    let client = reqwest::Client::builder()
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(reqwest::Certificate::from_der(&root).expect("the emulator's certificate"))
+        .build()
+        .expect("a TLS client");
+    let endpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, data_port));
+    let health = format!("https://{endpoint}/__admin/health");
+    let mut last = String::from("no attempt");
+    for _ in 0..100 {
+        match client.get(&health).send().await {
+            Ok(answer) if answer.status().is_success() => return (client, endpoint),
+            Ok(answer) => last = format!("status {}", answer.status()),
+            Err(error) => last = format!("{error:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the data port did not answer: {last}");
 }

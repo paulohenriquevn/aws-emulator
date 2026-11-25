@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Fixed
 - A request addressed to `aws.emulator.internal`, the name pods reach the emulator by, no longer routes as a service named `aws`. An unsigned STS `AssumeRoleWithWebIdentity` from a pod answered `UnknownService`, so no IRSA pod could get credentials
 - An Application Load Balancer relays its target's answer as it arrives, so a Server-Sent Events stream reaches the client event by event, on the emulator's endpoint and on the load balancer's own address. The idle timeout is now `idle_timeout.timeout_seconds` and counts inactivity: a target that sends nothing for that long is answered 504, and one that goes quiet after its answer started has its connection closed. Before, the whole answer was held, and cut with 504 at 60 seconds even while the target was sending
+- A CloudFront distribution relays its origin's answer as it arrives when the cache behavior neither caches nor compresses it (`Managed-CachingDisabled`, for one), so a Server-Sent Events stream from an app behind a distribution reaches the viewer event by event, on the emulator's endpoint and on the distribution's own address. `OriginReadTimeout` bounds the wait for the answer to start and each pause after it, so an origin that goes quiet for that long after its answer started has the viewer's connection closed. Before, the edge held the whole answer, and the viewer got nothing until the stream ended (#30)
 
 ## [0.4.2] - 2026-11-24
 

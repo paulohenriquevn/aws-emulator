@@ -265,6 +265,15 @@ jobs:
           cargo test -p service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10
           cargo test -p aws-emulator-fork-router --test alb_streaming_response
 
+      - name: A CloudFront distribution relays a streamed origin answer as it arrives
+        # The edge's unit tests, its data plane and published address suites, which serve
+        # through the in-process transport the relay changed, and the streaming cases end to
+        # end. vendor/server's unit tests ran in the step above.
+        run: |
+          cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --lib -- edge
+          cargo test -p service-com-amazonaws-cloudfront-cloudfront2020-05-31 --test all -- edge_ published_edge_address
+          cargo test -p aws-emulator-fork-router --test cloudfront_streaming_response
+
       - name: Unit tests of the workload identity patches
         run: >-
           cargo test --lib

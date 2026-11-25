@@ -16,83 +16,12 @@
 
 mod support;
 
-use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use support::{cell_load_balancer, elb, on_authenticating_router};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use support::{cell_load_balancer, elb, event_stream_target, events_body, on_authenticating_router, on_data_port, EventStream as Target};
 
 /// The idle timeout the load balancer is given, low so the cases finish quickly.
 const IDLE_TIMEOUT_SECONDS: u64 = 2;
-
-/// What the target does once it has read a request.
-#[derive(Clone, Copy)]
-enum Target {
-    /// Sends the head and `events` events, one per second, then ends the body.
-    Events { events: u32 },
-    /// Sends the head and one event, then nothing, holding the connection open.
-    StallsAfterOneEvent,
-    /// Sends nothing, holding the connection open.
-    Silent,
-}
-
-/// An HTTP target on a loopback port that behaves as `behaviour` says on `/events`, and
-/// answers any other path, the health check's included, with an empty 200; answers its port.
-async fn target(behaviour: Target) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
-    let port = listener.local_addr().expect("a bound address").port();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            tokio::spawn(async move {
-                let mut received = Vec::new();
-                let mut buffer = [0u8; 4096];
-                while !received.windows(4).any(|window| window == b"\r\n\r\n") {
-                    match stream.read(&mut buffer).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(read) => received.extend_from_slice(&buffer[..read]),
-                    }
-                }
-                if !received.starts_with(b"GET /events ") {
-                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
-                    let _ = stream.shutdown().await;
-                    return;
-                }
-                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                            cache-control: no-cache\r\ntransfer-encoding: chunked\r\n\r\n";
-                let event = |number: u32| {
-                    let data = format!("data: {number}\n\n");
-                    format!("{:x}\r\n{data}\r\n", data.len())
-                };
-                match behaviour {
-                    Target::Events { events } => {
-                        let _ = stream.write_all(head.as_bytes()).await;
-                        for number in 1..=events {
-                            let _ = stream.write_all(event(number).as_bytes()).await;
-                            let _ = stream.flush().await;
-                            if number < events {
-                                tokio::time::sleep(Duration::from_secs(1)).await;
-                            }
-                        }
-                        let _ = stream.write_all(b"0\r\n\r\n").await;
-                        let _ = stream.shutdown().await;
-                    }
-                    Target::StallsAfterOneEvent => {
-                        let _ = stream.write_all(head.as_bytes()).await;
-                        let _ = stream.write_all(event(1).as_bytes()).await;
-                        let _ = stream.flush().await;
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    }
-                    Target::Silent => tokio::time::sleep(Duration::from_secs(30)).await,
-                }
-            });
-        }
-    });
-    port
-}
 
 /// Where the client sends the request.
 #[derive(Clone, Copy)]
@@ -103,12 +32,6 @@ enum Dialled {
     OwnAddress,
 }
 
-/// A loopback port nothing listens on.
-fn free_port() -> u16 {
-    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a loopback port");
-    probe.local_addr().expect("a bound address").port()
-}
-
 /// Run `case` with a load balancer in front of a target behaving as `behaviour`, its idle
 /// timeout set to [`IDLE_TIMEOUT_SECONDS`], and the router served on a data port. `case` is
 /// handed a client and the request to send.
@@ -117,12 +40,9 @@ fn on_served_load_balancer(
     dialled: Dialled,
     case: impl FnOnce(reqwest::RequestBuilder) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> + Send + 'static,
 ) {
-    // The served data port writes its client files under the home directory; this test's
-    // go to the target directory rather than the developer's.
-    std::env::set_var("HOME", env!("CARGO_TARGET_TMPDIR"));
     on_authenticating_router(move |router, engine| {
         Box::pin(async move {
-            let port = target(behaviour).await;
+            let port = event_stream_target(behaviour).await;
             let (arn, dns_name) = cell_load_balancer(&router, &engine, port).await;
             let idle = IDLE_TIMEOUT_SECONDS.to_string();
             elb(
@@ -136,29 +56,7 @@ fn on_served_load_balancer(
             )
             .await;
 
-            let data_port = free_port();
-            tokio::spawn(emulator_server::serve_emulator_on(router, Ipv4Addr::LOCALHOST.into(), data_port));
-            let root = emulator_server::TlsCertificateAuthority::for_this_process().der().to_vec();
-            let client = reqwest::Client::builder()
-                .tls_built_in_root_certs(false)
-                .add_root_certificate(reqwest::Certificate::from_der(&root).expect("the emulator's certificate"))
-                .build()
-                .expect("a TLS client");
-            let endpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, data_port));
-            let health = format!("https://{endpoint}/__admin/health");
-            let mut last = String::from("no attempt");
-            for _ in 0..100 {
-                match client.get(&health).send().await {
-                    Ok(answer) if answer.status().is_success() => {
-                        last.clear();
-                        break;
-                    }
-                    Ok(answer) => last = format!("status {}", answer.status()),
-                    Err(error) => last = format!("{error:?}"),
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            assert!(last.is_empty(), "the data port did not answer: {last}");
+            let (client, endpoint) = on_data_port(router).await;
 
             let request = match dialled {
                 Dialled::Endpoint => client.get(format!("https://{endpoint}/events")).header("host", dns_name),
@@ -174,14 +72,14 @@ fn on_served_load_balancer(
 fn an_event_stream_reaches_the_client_event_by_event() {
     // Five events a second apart outlast the two-second idle timeout as a whole, but never
     // leave the connection idle for one.
-    on_served_load_balancer(Target::Events { events: 5 }, Dialled::Endpoint, |request| {
+    on_served_load_balancer(Target::Events { events: 5, interval_seconds: 1 }, Dialled::Endpoint, |request| {
         Box::pin(five_events_one_by_one(request))
     });
 }
 
 #[test]
 fn an_event_stream_reaches_the_client_event_by_event_on_the_load_balancers_own_address() {
-    on_served_load_balancer(Target::Events { events: 5 }, Dialled::OwnAddress, |request| {
+    on_served_load_balancer(Target::Events { events: 5, interval_seconds: 1 }, Dialled::OwnAddress, |request| {
         Box::pin(five_events_one_by_one(request))
     });
 }
@@ -222,8 +120,7 @@ async fn five_events_one_by_one(request: reqwest::RequestBuilder) {
     {
         whole.push_str(&String::from_utf8_lossy(&chunk));
     }
-    let expected: String = (1..=5).map(|number| format!("data: {number}\n\n")).collect();
-    assert_eq!(whole, expected);
+    assert_eq!(whole, events_body(5));
 }
 
 #[test]
