@@ -83,8 +83,9 @@ jobs:
     needs: tested-tree
     if: ${{ !inputs.emulator-run-id && !needs.tested-tree.outputs.run-id }}
     runs-on: ubuntu-latest
-    # The run took 139 minutes on 0.4.0; a tighter limit fails a green run on a slow runner.
-    timeout-minutes: 180
+    # The run took 139 minutes on 0.4.0, and the S3 suite added 16 since. A cold cache took a
+    # run with every step green to 180 minutes; a tighter limit fails a green run.
+    timeout-minutes: 210
     steps:
       - name: Make room for the EC2 crate
         # The hosted runner has about 7 GB of memory; without swap, rustc on the EC2
