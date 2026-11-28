@@ -34,6 +34,10 @@ pub use tls_certificate_authority::TlsCertificateAuthority;
 // origin's answer a CloudFront edge relays).
 mod relayed_body;
 pub use relayed_body::{RelayError, RelayedBody, RelayedResponseWanted, ResponseBodySlot};
+// fork: a client connection a plane takes over when its target switches protocol (a
+// WebSocket through a load balancer).
+mod protocol_switch;
+pub use protocol_switch::{ClientConnection, ProtocolSwitch, SwitchedStream};
 
 /// Resource-listener surfaces: the agent-facing `tcp()`/`http()` listeners a generated
 /// service opens for a resource (RDS Postgres port, API Gateway invoke URL),
@@ -1028,7 +1032,20 @@ async fn emulator_service_fallback<S: EmulatorService>(
     axum::extract::State(service): axum::extract::State<Arc<S>>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    // fork: a request that asks to change protocol leaves its connection for a plane whose
+    // target agrees ([`ProtocolSwitch`]). hyper resolves it once the `101` is written.
+    let switch = parts
+        .extensions
+        .remove::<hyper::upgrade::OnUpgrade>()
+        .map(|upgrade| {
+            ProtocolSwitch::new(async move {
+                upgrade
+                    .await
+                    .map(hyper_util::rt::TokioIo::new)
+                    .map_err(std::io::Error::other)
+            })
+        });
     let body_bytes = match read_production_body(body, max_production_body_bytes()).await {
         Ok(b) => b,
         Err(status) => {
@@ -1039,11 +1056,25 @@ async fn emulator_service_fallback<S: EmulatorService>(
         }
     };
     let mut emulator_req = http::Request::from_parts(parts, body_bytes);
+    if let Some(switch) = &switch {
+        emulator_req.extensions_mut().insert(switch.clone());
+    }
     // fork: a plane that relays its body as it arrives leaves it here ([`ResponseBodySlot`]).
     let relayed = ResponseBodySlot::default();
     emulator_req.extensions_mut().insert(relayed.clone());
     let emulator_resp = service.handle_request(emulator_req).await;
     let (mut resp_parts, resp_body) = emulator_resp.into_parts();
+    if resp_parts.status == http::StatusCode::SWITCHING_PROTOCOLS {
+        // The headers of the switch describe this connection, so the plane's answer does
+        // not carry them: they are written here, for the protocol the plane switched to.
+        let protocol = switch.as_ref().and_then(ProtocolSwitch::accepted);
+        if let Some(value) = protocol.and_then(|name| http::HeaderValue::from_str(&name).ok()) {
+            resp_parts
+                .headers
+                .insert(http::header::CONNECTION, http::HeaderValue::from_static("upgrade"));
+            resp_parts.headers.insert(http::header::UPGRADE, value);
+        }
+    }
     match relayed.take() {
         Some(body) => {
             // A length measured on the empty buffered body is not the relayed body's.

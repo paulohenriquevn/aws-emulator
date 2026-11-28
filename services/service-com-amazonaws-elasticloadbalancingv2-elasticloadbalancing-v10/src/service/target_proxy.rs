@@ -43,7 +43,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use emulator_server::{RelayError, RelayedBody, ResponseBodySlot};
+use emulator_server::{ClientConnection, ProtocolSwitch, RelayError, RelayedBody, ResponseBodySlot};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Body, Frame, SizeHint};
 use hyper_util::rt::TokioIo;
@@ -129,6 +129,7 @@ pub(super) async fn served<Eng: Send + Sync + 'static>(
     request: &DataPlaneRequest,
     body: &[u8],
     relayed: Option<&ResponseBodySlot>,
+    switch: Option<&ProtocolSwitch>,
 ) -> Served {
     let Some(transport) = proxied.target_protocol.as_deref().and_then(Transport::of) else {
         tracing::warn!(
@@ -167,7 +168,7 @@ pub(super) async fn served<Eng: Send + Sync + 'static>(
         );
         return Served::status(TARGET_UNREACHABLE_STATUS);
     }
-    match exchange(&address, transport, proxied, request, body, relayed).await {
+    match exchange(&address, transport, proxied, request, body, relayed, switch).await {
         Ok(mut served) => {
             if let Some(field) = proxied.set_cookie.clone() {
                 served.headers.push(("set-cookie".to_string(), field));
@@ -322,29 +323,63 @@ async fn exchange(
     request: &DataPlaneRequest,
     body: &[u8],
     relayed: Option<&ResponseBodySlot>,
+    switch: Option<&ProtocolSwitch>,
 ) -> Result<Served, Failure> {
     let stream = connect(address, proxied.port, transport).await?;
-    let outgoing = outgoing_request(proxied, request, body)?;
+    // fork: a request that asks to change protocol is passed on asking for it too, when
+    // there is a client connection to join to the target's ([`ProtocolSwitch`]).
+    let upgrading = switch.and_then(|switch| requested_protocol(request).map(|protocol| (switch, protocol)));
+    let outgoing = outgoing_request(proxied, request, body, upgrading.as_ref().map(|(_, protocol)| protocol.as_str()))?;
+    let with_upgrades = upgrading.is_some();
     let idle = proxied.idle_timeout;
     // The head is the target's first data, so waiting for it is bounded by the idle timeout.
-    let (parts, incoming) = tokio::time::timeout(idle, async move {
+    let mut response = tokio::time::timeout(idle, async move {
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .map_err(|error| Failure::Unreachable(format!("handshake: {error}")))?;
-        // The connection is driven until the answer's body has been read or dropped.
+        // The connection is driven until the answer's body has been read or dropped, or,
+        // for a switched protocol, until the connection has been handed over.
         tokio::spawn(async move {
-            if let Err(error) = connection.await {
+            let ended = if with_upgrades {
+                connection.with_upgrades().await
+            } else {
+                connection.await
+            };
+            if let Err(error) = ended {
                 tracing::debug!(%error, "the connection to the target ended with an error");
             }
         });
-        let response = sender
+        sender
             .send_request(outgoing)
             .await
-            .map_err(|error| Failure::Unreachable(format!("request: {error}")))?;
-        Ok::<_, Failure>(response.into_parts())
+            .map_err(|error| Failure::Unreachable(format!("request: {error}")))
     })
     .await
     .map_err(|_| Failure::TimedOut)??;
+    if response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
+        if let Some((switch, requested)) = upgrading {
+            // The protocol the target switched to, which is the one asked for unless the
+            // target named another.
+            let protocol = response
+                .headers()
+                .get(hyper::header::UPGRADE)
+                .and_then(|value| value.to_str().ok())
+                .map_or(requested, str::to_string);
+            let target_side = hyper::upgrade::on(&mut response);
+            let Some(client_side) = switch.accept(&protocol) else {
+                return Err(Failure::Unreachable(
+                    "the client's connection was already handed over, so it cannot be joined to the target's".to_string(),
+                ));
+            };
+            tokio::spawn(joined(client_side, target_side, proxied.target_group_arn.clone()));
+            return Ok(Served {
+                status: response.status().as_u16(),
+                headers: relayed_headers(response.headers()),
+                ..Served::default()
+            });
+        }
+    }
+    let (parts, incoming) = response.into_parts();
     let body = IdleTimeoutBody::new(incoming, idle, proxied.target_group_arn.clone());
     let served = Served {
         status: parts.status.as_u16(),
@@ -370,6 +405,48 @@ async fn exchange(
         body: collected.to_vec(),
         ..served
     })
+}
+
+/// fork: the protocol a request asks its connection to be switched to: the `Upgrade` header
+/// of a request whose `Connection` header lists `upgrade` (RFC 9110, section 7.8).
+fn requested_protocol(request: &DataPlaneRequest) -> Option<String> {
+    let values = |wanted: &'static str| {
+        request
+            .headers
+            .iter()
+            .filter(move |(name, _)| name.eq_ignore_ascii_case(wanted))
+            .map(|(_, value)| value.as_str())
+    };
+    let asked = values("connection")
+        .flat_map(|value| value.split(','))
+        .any(|option| option.trim().eq_ignore_ascii_case("upgrade"));
+    if !asked {
+        return None;
+    }
+    values("upgrade").next().map(str::to_string)
+}
+
+/// fork: relay bytes between the client's connection and the target's, both ways, until
+/// either side closes. An Application Load Balancer also closes a switched connection that
+/// stays idle for its idle timeout; this emulator leaves it open.
+async fn joined(client_side: ClientConnection, target_side: hyper::upgrade::OnUpgrade, target_group_arn: String) {
+    let mut client = match client_side.await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(target_group = %target_group_arn, %error, "the client's connection did not switch protocol, so it was not joined to the target's");
+            return;
+        }
+    };
+    let mut target = match target_side.await {
+        Ok(target) => TokioIo::new(target),
+        Err(error) => {
+            tracing::warn!(target_group = %target_group_arn, %error, "the target's connection did not switch protocol, so the client's was closed");
+            return;
+        }
+    };
+    if let Err(error) = tokio::io::copy_bidirectional(&mut client, &mut target).await {
+        tracing::debug!(target_group = %target_group_arn, %error, "a switched connection ended with an error");
+    }
 }
 
 /// fork: why a target's body ended early: it sent nothing for the idle timeout.
@@ -447,6 +524,7 @@ fn outgoing_request(
     proxied: &Proxied,
     request: &DataPlaneRequest,
     body: &[u8],
+    upgrade: Option<&str>,
 ) -> Result<hyper::Request<Full<Bytes>>, Failure> {
     let target = if request.query.is_empty() {
         request.path.clone()
@@ -458,6 +536,11 @@ fn outgoing_request(
         .uri(target);
     for (name, value) in forwarded_headers(proxied, request) {
         builder = builder.header(name, value);
+    }
+    // The two headers that ask the target to switch protocol describe a connection, so
+    // they are written for this one rather than passed on.
+    if let Some(protocol) = upgrade {
+        builder = builder.header("connection", "upgrade").header("upgrade", protocol);
     }
     builder
         .body(Full::new(Bytes::copy_from_slice(body)))

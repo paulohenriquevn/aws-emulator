@@ -636,6 +636,10 @@ fn runtime_api_request_from_parts(parts: &http::request::Parts, body: Vec<u8>) -
     if let Some(slot) = parts.extensions.get::<emulator_server::ResponseBodySlot>() {
         req.add_extension(slot.clone());
     }
+    // fork: so does the client's connection, for a plane whose target switches protocol.
+    if let Some(switch) = parts.extensions.get::<emulator_server::ProtocolSwitch>() {
+        req.add_extension(switch.clone());
+    }
     req
 }
 
