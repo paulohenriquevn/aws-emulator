@@ -181,6 +181,9 @@ jobs:
       - name: A CloudFront distribution relays a streamed origin answer as it arrives
         run: cargo test -p aws-emulator-fork-router --test cloudfront_streaming_response
 
+      - name: An Application Load Balancer passes a WebSocket on to its target
+        run: cargo test -p aws-emulator-fork-router --test alb_websocket
+
   tls:
     name: tls
     # Proves the TLS test guards its fix: red with the fix removed, green with it. Both

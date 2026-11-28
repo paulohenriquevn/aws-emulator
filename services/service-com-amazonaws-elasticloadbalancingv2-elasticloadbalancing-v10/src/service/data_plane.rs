@@ -811,7 +811,9 @@ pub async fn serve<Eng: Send + Sync + 'static>(
                     // A listener that writes the answer as it arrives left a slot for the
                     // target's body; a request made in process carries none.
                     let relayed = req.extension::<::emulator_server::ResponseBodySlot>();
-                    super::target_proxy::served(engine, &proxied, &request, body, relayed).await
+                    // And the client's connection, for a target that switches protocol.
+                    let switch = req.extension::<::emulator_server::ProtocolSwitch>();
+                    super::target_proxy::served(engine, &proxied, &request, body, relayed, switch).await
                 }
             }
         }

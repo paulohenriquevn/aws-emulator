@@ -368,3 +368,105 @@ async fn a_target_whose_security_group_admits_the_traffic_port_answers() {
 
     assert_eq!(status, 200, "{body:?}");
 }
+
+/// A server that agrees to switch protocol when asked the way a WebSocket client asks, then
+/// sends back every byte it reads on the switched connection. Asked any other way it
+/// answers 400. Answers its port.
+async fn upgrading_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
+    let port = listener.local_addr().expect("a bound address").port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut received = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer).await {
+                        Ok(read) if read > 0 => received.extend_from_slice(&buffer[..read]),
+                        _ => return,
+                    }
+                }
+                let head = String::from_utf8_lossy(&received).to_ascii_lowercase();
+                if !(head.contains("\r\nconnection: upgrade\r\n") && head.contains("\r\nupgrade: websocket\r\n")) {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .await;
+                    return;
+                }
+                let agreed = b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+                if stream.write_all(agreed).await.is_err() {
+                    return;
+                }
+                loop {
+                    match stream.read(&mut buffer).await {
+                        Ok(read) if read > 0 => {
+                            if stream.write_all(&buffer[..read]).await.is_err() {
+                                return;
+                            }
+                        }
+                        _ => return,
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+/// A request that asks for a WebSocket, as a listener hands it to the load balancer: with
+/// the client's connection left in a switch. Answers the client's end of that connection.
+fn websocket_request(dns_name: &str) -> (http::Request<bytes::Bytes>, emulator_server::ProtocolSwitch, tokio::io::DuplexStream) {
+    let (client, listener_side) = tokio::io::duplex(1024);
+    let switch = emulator_server::ProtocolSwitch::new(async move { Ok(listener_side) });
+    let mut request = http::Request::builder()
+        .method("GET")
+        .uri(format!("http://{dns_name}/terminal"))
+        .header("host", dns_name)
+        .header("connection", "Upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .body(bytes::Bytes::new())
+        .expect("a well-formed request");
+    request.extensions_mut().insert(switch.clone());
+    (request, switch, client)
+}
+
+/// A WebSocket did not get through a load balancer: the target received the request
+/// without its `Connection` header and refused it, so a terminal behind one never opened.
+#[tokio::test]
+async fn a_websocket_upgrade_reaches_the_target_and_the_two_connections_are_joined() {
+    let (router, dns_name) = forwarding_to(upgrading_server().await).await;
+    let (request, switch, mut client) = websocket_request(&dns_name);
+
+    let response = router.dispatch(request).await;
+
+    assert_eq!(response.status().as_u16(), 101, "the target agreed to switch, so the load balancer answers 101");
+    assert_eq!(switch.accepted().as_deref(), Some("websocket"), "the listener is told the protocol to answer with");
+    assert_eq!(
+        response.headers().get("sec-websocket-accept").and_then(|value| value.to_str().ok()),
+        Some("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+        "the target's handshake answer reaches the client"
+    );
+    client.write_all(b"ping").await.expect("the client writes on its switched connection");
+    let mut echoed = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut echoed))
+        .await
+        .expect("the target's bytes arrive within five seconds")
+        .expect("the switched connection stays open");
+    assert_eq!(&echoed, b"ping", "what the client sends reaches the target, and what the target sends reaches the client");
+}
+
+#[tokio::test]
+async fn a_target_that_does_not_switch_protocol_leaves_the_clients_connection_alone() {
+    let (router, dns_name) = forwarding_to(echo_server().await).await;
+    let (request, switch, _client) = websocket_request(&dns_name);
+
+    let response = router.dispatch(request).await;
+
+    assert_eq!(response.status().as_u16(), 200, "the target answered the request as plain HTTP");
+    assert_eq!(switch.accepted(), None, "no protocol was switched, so the listener writes an ordinary answer");
+}
